@@ -824,6 +824,25 @@ button {
   min-height: 0;
 }
 
+.ide-term {
+  flex: 1 1 45%;
+  min-height: 0;
+  padding: 6px 12px;
+  overflow: hidden;
+}
+
+.ide-term:not(.active) {
+  display: none;
+}
+
+.ide-term .xterm {
+  height: 100%;
+}
+
+.ide-term .xterm-viewport {
+  background-color: transparent !important;
+}
+
 .ide-line {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

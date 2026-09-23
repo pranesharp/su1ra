@@ -1,9 +1,11 @@
 import asyncio
+import base64
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -13,6 +15,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 import ollama
+import ptyrunner
 import runner
 import store
 
@@ -30,6 +33,10 @@ app.add_middleware(
 )
 
 RUN_STDIN = {}
+RUN_PTY = {}
+TIMEOUT_SECONDS = 30
+TERM_OUTPUT_CAP = 5 * 1024 * 1024
+HAS_PTY = os.name == "posix"
 
 MAX_TOOL_ROUNDS = 3
 MAX_RESULT_CHARS = 12000
@@ -425,8 +432,10 @@ async def run(body: RunRequest):
         raise HTTPException(422, "Only python is supported")
     scratch = store.DATA_DIR / "scratch"
     scratch.mkdir(parents=True, exist_ok=True)
+    if HAS_PTY:
+        return StreamingResponse(pty_generator(run_id, body.code, scratch), media_type="application/x-ndjson")
 
-    async def generator():
+    async def legacy_generator():
         proc = None
 
         def kill_proc():
@@ -525,11 +534,71 @@ async def run(body: RunRequest):
                 pass
             kill_proc()
 
-    return StreamingResponse(generator(), media_type="application/x-ndjson")
+    return StreamingResponse(legacy_generator(), media_type="application/x-ndjson")
+
+
+def term_note(text):
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+async def pty_generator(run_id, code, scratch):
+    sess = ptyrunner.PtySession(code, scratch)
+    try:
+        sess.start()
+    except Exception as exc:
+        yield json.dumps({"error": str(exc)}) + "\n"
+        return
+    RUN_PTY[run_id] = sess
+    try:
+        yield json.dumps({"run": run_id, "term": True}) + "\n"
+        start = time.monotonic()
+        total = 0
+        while True:
+            chunk = await asyncio.to_thread(sess.read, 0.25)
+            if chunk:
+                total += len(chunk)
+                if total > TERM_OUTPUT_CAP:
+                    sess.kill()
+                    yield json.dumps({"o": term_note("\r\n// output cap reached — process killed\r\n")}) + "\n"
+                    yield json.dumps({"exit": -9}) + "\n"
+                    return
+                yield json.dumps({"o": base64.b64encode(chunk).decode("ascii")}) + "\n"
+            if chunk is None or chunk == b"":
+                rc = sess.poll()
+                if chunk == b"" or rc is not None:
+                    break
+            now = time.monotonic()
+            if sess.stop_deadline is not None and now > sess.stop_deadline and sess.alive():
+                sess.kill()
+            if now - start > TIMEOUT_SECONDS and sess.alive():
+                sess.kill()
+                yield json.dumps({"o": term_note("\r\n// timeout — killed after 30s\r\n")}) + "\n"
+                yield json.dumps({"exit": -9}) + "\n"
+                return
+        rc = sess.poll()
+        if rc is None:
+            sess.close()
+            rc = sess.poll()
+        yield json.dumps({"exit": rc if rc is not None else -1}) + "\n"
+    except asyncio.CancelledError:
+        sess.close()
+        raise
+    except Exception as exc:
+        yield json.dumps({"error": str(exc)}) + "\n"
+    finally:
+        RUN_PTY.pop(run_id, None)
+        sess.close()
 
 
 @app.post("/api/run/input")
 async def run_input(body: RunInput):
+    sess = RUN_PTY.get(body.run_id)
+    if sess is not None:
+        if not sess.write(body.text):
+            raise HTTPException(409, "Cannot write to terminal")
+        if "\x03" in body.text:
+            sess.stop_deadline = time.monotonic() + 2.5
+        return {"ok": True}
     writer = RUN_STDIN.get(body.run_id)
     if writer is None:
         raise HTTPException(404, "No running process for that run id")

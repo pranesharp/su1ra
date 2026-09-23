@@ -1,5 +1,53 @@
 import { useEffect, useRef, useState } from 'react'
+import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import '@xterm/xterm/css/xterm.css'
 import * as api from '../api'
+
+function stripAnsi(text) {
+  return text
+    .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, '')
+    .replace(/\x1B\[[0-9;?]*[ -/]*[@-~]/g, '')
+}
+
+function pushPlain(state, text) {
+  let i = 0
+  if (state.pendingCR && text.length) {
+    state.pendingCR = false
+    if (text[0] === '\n') {
+      state.buf += state.line + '\n'
+      state.line = ''
+      i = 1
+    } else {
+      state.line = ''
+    }
+  }
+  for (; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === '\r') {
+      if (text[i + 1] === '\n') {
+        state.buf += state.line + '\n'
+        state.line = ''
+        i++
+      } else if (i === text.length - 1) {
+        state.pendingCR = true
+        state.line = ''
+      } else {
+        state.line = ''
+      }
+    } else if (ch === '\n') {
+      state.buf += state.line + '\n'
+      state.line = ''
+    } else if (ch === '\b') {
+      state.line = state.line.slice(0, -1)
+    } else if (ch !== '\x07') {
+      state.line += ch
+    }
+  }
+  const full = state.buf + state.line
+  if (state.buf.length > 100000) state.buf = state.buf.slice(-80000)
+  return full
+}
 
 export default function IdePane({ width, code, onCodeChange, onClose, onResizeStart, onOutputChange, onSendToChat, runSignal }) {
   const [lines, setLines] = useState([])
@@ -8,11 +56,21 @@ export default function IdePane({ width, code, onCodeChange, onClose, onResizeSt
   const [elapsed, setElapsed] = useState(0)
   const [runId, setRunId] = useState(null)
   const [inputText, setInputText] = useState('')
+  const [termActive, setTermActive] = useState(false)
+  const [plainOut, setPlainOut] = useState('')
   const controllerRef = useRef(null)
   const areaRef = useRef(null)
   const gutterRef = useRef(null)
   const outRef = useRef(null)
   const startRef = useRef(0)
+  const hostRef = useRef(null)
+  const termRef = useRef(null)
+  const fitRef = useRef(null)
+  const decoderRef = useRef(new TextDecoder())
+  const plainRef = useRef({ buf: '', line: '' })
+  const termModeRef = useRef(false)
+  const runIdRef = useRef(null)
+  const pendingRef = useRef([])
 
   const lineCount = code.split('\n').length
 
@@ -35,8 +93,30 @@ export default function IdePane({ width, code, onCodeChange, onClose, onResizeSt
   }, [])
 
   useEffect(() => {
-    onOutputChange && onOutputChange({ lines, exitCode })
-  }, [lines, exitCode])
+    const text = termActive ? plainOut : lines.map((l) => l.text).join('\n')
+    onOutputChange && onOutputChange({ text, exitCode })
+  }, [lines, plainOut, exitCode, termActive])
+
+  useEffect(() => {
+    if (!hostRef.current) return
+    const ro = new ResizeObserver(() => {
+      requestAnimationFrame(() => {
+        try {
+          fitRef.current?.fit()
+        } catch {}
+      })
+    })
+    ro.observe(hostRef.current)
+    return () => ro.disconnect()
+  }, [])
+
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      try {
+        fitRef.current?.fit()
+      } catch {}
+    })
+  }, [width])
 
   const runRef = useRef()
   const runningRef = useRef(false)
@@ -63,8 +143,54 @@ export default function IdePane({ width, code, onCodeChange, onClose, onResizeSt
     }
   }
 
+  function ensureTerm() {
+    if (termRef.current) return termRef.current
+    const style = getComputedStyle(document.documentElement)
+    const term = new Terminal({
+      fontFamily: style.getPropertyValue('--mono').trim() || 'monospace',
+      fontSize: 12.5,
+      lineHeight: 1.35,
+      cursorBlink: true,
+      scrollback: 5000,
+      theme: {
+        background: '#00000000',
+        foreground: '#c6c6cc',
+        cursor: style.getPropertyValue('--accent').trim() || '#bf264a',
+        cursorAccent: '#101014',
+        selectionBackground: '#3a3a4166',
+      },
+    })
+    const fit = new FitAddon()
+    term.loadAddon(fit)
+    term.open(hostRef.current)
+    try {
+      fit.fit()
+    } catch {}
+    term.onData((data) => {
+      if (termModeRef.current && runningRef.current && runIdRef.current) {
+        api.sendRunInput(runIdRef.current, data).catch(() => {})
+      }
+    })
+    termRef.current = term
+    fitRef.current = fit
+    return term
+  }
+
+  function openTerm() {
+    const term = ensureTerm()
+    if (pendingRef.current.length) {
+      pendingRef.current.forEach((bytes) => term.write(bytes))
+      pendingRef.current = []
+    }
+    term.focus()
+  }
+
   function run() {
     if (running) {
+      if (termModeRef.current) {
+        api.sendRunInput(runIdRef.current, '\x03').catch(() => {})
+        return
+      }
       controllerRef.current?.abort()
       setRunning(false)
       return
@@ -72,14 +198,36 @@ export default function IdePane({ width, code, onCodeChange, onClose, onResizeSt
     setLines([])
     setExitCode(null)
     setRunId(null)
+    runIdRef.current = null
     setInputText('')
+    setPlainOut('')
+    plainRef.current = { buf: '', line: '' }
+    decoderRef.current = new TextDecoder()
+    termModeRef.current = false
+    termRef.current?.clear()
     setRunning(true)
     const controller = new AbortController()
     controllerRef.current = controller
     api.streamRun(
       { code, language: 'python' },
       {
-        onRun: (id) => setRunId(id),
+        onRun: (id, isTerm) => {
+          setRunId(id)
+          runIdRef.current = id
+          termModeRef.current = !!isTerm
+          setTermActive(!!isTerm)
+          if (isTerm) {
+            requestAnimationFrame(() => openTerm())
+          }
+        },
+        onTerm: (b64) => {
+          const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+          const text = decoderRef.current.decode(bytes, { stream: true })
+          if (termRef.current) termRef.current.write(bytes)
+          else pendingRef.current.push(bytes)
+          const plain = pushPlain(plainRef.current, stripAnsi(text))
+          setPlainOut(plain)
+        },
         onLine: (stream, text) => setLines((prev) => [...prev, { stream, text }]),
         onExit: (code) => {
           setRunning(false)
@@ -107,7 +255,7 @@ export default function IdePane({ width, code, onCodeChange, onClose, onResizeSt
   }
 
   function copyOutput() {
-    const text = lines.map((l) => l.text).join('\n')
+    const text = termActive ? plainOut : lines.map((l) => l.text).join('\n')
     if (!text) return
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).catch(() => fallbackCopy(text))
@@ -144,10 +292,10 @@ export default function IdePane({ width, code, onCodeChange, onClose, onResizeSt
   }
 
   const status = running
-    ? `// running… ${elapsed}s`
+    ? `// running... ${elapsed}s`
     : exitCode === null
       ? '// ready'
-      : exitCode === -1
+      : exitCode < 0
         ? '// killed'
         : `// exit ${exitCode}`
 
@@ -189,14 +337,17 @@ export default function IdePane({ width, code, onCodeChange, onClose, onResizeSt
           wrap="off"
         />
       </div>
-      <pre className="ide-out" ref={outRef}>
-        {lines.map((l, i) => (
-          <div key={i} className={`ide-line${l.stream === 'stderr' ? ' err' : ''}${l.stream === 'stdin' ? ' in' : ''}`}>
-            {l.text}
-          </div>
-        ))}
-      </pre>
-      {running && (
+      <div className={`ide-term${termActive ? ' active' : ''}`} ref={hostRef} onClick={() => termRef.current?.focus()} />
+      {!termActive && (
+        <pre className="ide-out" ref={outRef}>
+          {lines.map((l, i) => (
+            <div key={i} className={`ide-line${l.stream === 'stderr' ? ' err' : ''}${l.stream === 'stdin' ? ' in' : ''}`}>
+              {l.text}
+            </div>
+          ))}
+        </pre>
+      )}
+      {running && !termActive && (
         <div className="ide-input">
           <span className="ide-input-prompt">›</span>
           <input

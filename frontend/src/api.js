@@ -128,7 +128,11 @@ export async function streamRun(body, handlers, signal) {
         continue
       }
       if (obj.run) {
-        handlers.onRun(obj.run)
+        handlers.onRun(obj.run, obj.term === true)
+        continue
+      }
+      if (obj.o) {
+        handlers.onTerm?.(obj.o)
         continue
       }
       if (obj.error) {

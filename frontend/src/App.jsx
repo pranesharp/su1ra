@@ -40,7 +40,7 @@ export default function App() {
   const [ideOpen, setIdeOpen] = useState(false)
   const [ideWidth, setIdeWidth] = useState(460)
   const [ideCode, setIdeCode] = useState(STARTER_CODE)
-  const [ideOutput, setIdeOutput] = useState({ lines: [], exitCode: null })
+  const [ideOutput, setIdeOutput] = useState({ text: '', exitCode: null })
   const abortRef = useRef(null)
   const pendingToolRef = useRef(null)
   const ideRunSeenRef = useRef(null)
@@ -271,11 +271,11 @@ export default function App() {
 
   function attachIdeRun(text) {
     const finished =
-      ideOutput.exitCode !== null && ideOutput.lines.length > 0 && ideOutput !== ideRunSeenRef.current
+      ideOutput.exitCode !== null && ideOutput.text && ideOutput.text.trim() && ideOutput !== ideRunSeenRef.current
     if (!finished) return text
     ideRunSeenRef.current = ideOutput
-    const out = ideOutput.lines.map((l) => l.text).join('\n')
-    const status = ideOutput.exitCode === -1 ? 'killed' : `exit ${ideOutput.exitCode}`
+    const out = ideOutput.text
+    const status = ideOutput.exitCode < 0 ? 'killed' : `exit ${ideOutput.exitCode}`
     const parts = [text, '', `// attached: ide run (${status})`, '', '```python', ideCode, '```']
     if (out.trim()) parts.push('', 'output:', '', '```', out, '```')
     return parts.join('\n')
@@ -410,9 +410,9 @@ export default function App() {
 
   function sendIdeToChat() {
     ideRunSeenRef.current = ideOutput
-    const { lines, exitCode } = ideOutput
-    const out = lines.map((l) => l.text).join('\n')
-    const status = exitCode === null ? 'not run' : exitCode === -1 ? 'killed' : `exit ${exitCode}`
+    const { text, exitCode } = ideOutput
+    const out = text
+    const status = exitCode === null ? 'not run' : exitCode < 0 ? 'killed' : `exit ${exitCode}`
     const parts = [
       'Here is the code currently in my IDE editor:',
       '',
