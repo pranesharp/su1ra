@@ -80,7 +80,7 @@ function ToolOutputBlock({ content }) {
   )
 }
 
-function splitThinking(content) {
+export function splitThinking(content) {
   const parts = []
   let rest = content
   let inThink = false
@@ -102,7 +102,7 @@ function splitThinking(content) {
   return parts
 }
 
-function AssistantContent({ content, toolCalls, streaming, onLoadToIde }) {
+function AssistantContent({ content, toolCalls, streaming, onLoadToIde, onRunCode }) {
   if (!content && !(toolCalls || []).length) return streaming ? <span className="cursor" /> : null
   const parts = splitThinking(content)
   return (
@@ -126,8 +126,8 @@ function AssistantContent({ content, toolCalls, streaming, onLoadToIde }) {
                       <div className="code-head">
                         <span className="code-lang">{lang || 'text'}</span>
                         {lang === 'python' && (
-                          <button className="code-load" onClick={() => onLoadToIde && onLoadToIde(text)}>
-                            [ load to ide ]
+                          <button className="code-run" onClick={() => onRunCode && onRunCode(text)}>
+                            [ run code ]
                           </button>
                         )}
                       </div>
@@ -157,7 +157,7 @@ function AssistantContent({ content, toolCalls, streaming, onLoadToIde }) {
   )
 }
 
-export default function ChatView({ messages, status, streaming, showStats, onLoadToIde }) {
+export default function ChatView({ messages, status, streaming, showStats, onLoadToIde, onRunCode }) {
   const scrollRef = useRef(null)
   const stickRef = useRef(true)
 
@@ -202,7 +202,7 @@ export default function ChatView({ messages, status, streaming, showStats, onLoa
             ) : (
               <div key={m.id} className="msg assistant">
                 <div className="who">── assistant ─────────────────────────────</div>
-                <AssistantContent content={m.content} toolCalls={m.tool_calls} streaming={streaming} onLoadToIde={onLoadToIde} />
+                <AssistantContent content={m.content} toolCalls={m.tool_calls} streaming={streaming} onLoadToIde={onLoadToIde} onRunCode={onRunCode} />
                 {m.stats && showStats && (
                   <pre className="stats-out">{formatStats(m.stats)}</pre>
                 )}

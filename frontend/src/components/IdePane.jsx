@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 
-export default function IdePane({ width, code, onCodeChange, onClose, onResizeStart, onOutputChange, onSendToChat }) {
+export default function IdePane({ width, code, onCodeChange, onClose, onResizeStart, onOutputChange, onSendToChat, runSignal }) {
   const [lines, setLines] = useState([])
   const [running, setRunning] = useState(false)
   const [exitCode, setExitCode] = useState(null)
@@ -37,6 +37,25 @@ export default function IdePane({ width, code, onCodeChange, onClose, onResizeSt
   useEffect(() => {
     onOutputChange && onOutputChange({ lines, exitCode })
   }, [lines, exitCode])
+
+  const runRef = useRef()
+  const runningRef = useRef(false)
+  const lastSignalRef = useRef(runSignal)
+
+  useEffect(() => {
+    runRef.current = run
+  })
+
+  useEffect(() => {
+    runningRef.current = running
+  }, [running])
+
+  useEffect(() => {
+    if (runSignal !== lastSignalRef.current) {
+      lastSignalRef.current = runSignal
+      if (!runningRef.current) runRef.current?.()
+    }
+  }, [runSignal])
 
   function syncScroll() {
     if (gutterRef.current && areaRef.current) {

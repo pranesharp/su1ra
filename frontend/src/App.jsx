@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from './api'
 import { applyAccent, DEFAULT_ACCENT } from './theme'
-import ChatView from './components/ChatView.jsx'
+import ChatView, { splitThinking } from './components/ChatView.jsx'
 import Composer from './components/Composer.jsx'
 import Logo from './components/Logo.jsx'
 import SettingsModal from './components/SettingsModal.jsx'
@@ -44,6 +44,7 @@ export default function App() {
   const abortRef = useRef(null)
   const pendingToolRef = useRef(null)
   const ideRunSeenRef = useRef(null)
+  const [runSignal, setRunSignal] = useState(0)
   const idRef = useRef(1000)
   const widthRef = useRef(460)
   const moveRef = useRef(null)
@@ -364,6 +365,12 @@ export default function App() {
       setStreaming(false)
       abortRef.current = null
     }
+    const visible = splitThinking(partial)
+      .filter((p) => !p.think)
+      .map((p) => p.text)
+      .join('\n')
+    const block = extractLastPythonBlock(visible)
+    if (block) loadToIde(block)
     const convs = await api.getConversations()
     setConversations(convs.conversations)
   }
@@ -377,6 +384,12 @@ export default function App() {
     await api.saveSettings({ ide_open: false })
   }
 
+  function extractLastPythonBlock(text) {
+    const blocks = [...text.matchAll(/```python\n([\s\S]*?)```/g)]
+    const last = blocks.length ? blocks[blocks.length - 1][1].replace(/\n$/, '') : null
+    return last
+  }
+
   function loadToIde(code) {
     setIdeCode(code)
     if (!ideOpen) {
@@ -384,6 +397,15 @@ export default function App() {
       api.saveSettings({ ide_open: true })
     }
     pushSystem(`// loaded ${code.split('\n').length} lines into the ide`)
+  }
+
+  function runInIde(code) {
+    setIdeCode(code)
+    if (!ideOpen) {
+      setIdeOpen(true)
+      api.saveSettings({ ide_open: true })
+    }
+    setRunSignal((s) => s + 1)
   }
 
   function sendIdeToChat() {
@@ -463,7 +485,7 @@ export default function App() {
             <span className="meta-model"> · model: {currentModel || 'none'}</span>
           </div>
         </header>
-        <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} onLoadToIde={loadToIde} />
+        <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} onLoadToIde={loadToIde} onRunCode={runInIde} />
         <Composer commands={COMMANDS} disabled={!currentModel} streaming={streaming} onSend={send} onStop={stop} />
       </main>
       {ideOpen && (
@@ -477,6 +499,7 @@ export default function App() {
             onResizeStart={startResize}
             onOutputChange={setIdeOutput}
             onSendToChat={sendIdeToChat}
+            runSignal={runSignal}
           />
         </>
       )}

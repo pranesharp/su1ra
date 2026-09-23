@@ -84,12 +84,12 @@ export async function streamChat(body, handlers, signal) {
       if (obj.tool) handlers.onTool?.(obj.tool)
       if (obj.stats) handlers.onStats?.(obj.stats)
       if (obj.done) {
-        handlers.onDone()
+        handlers.onDone?.()
         return
       }
     }
   }
-  handlers.onDone()
+  handlers.onDone?.()
 }
 
 export async function streamRun(body, handlers, signal) {
