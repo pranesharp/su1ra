@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { formatStats } from '../statsFormat'
 
 function ThinkBlock({ text }) {
   const [open, setOpen] = useState(false)
@@ -55,7 +56,7 @@ function AssistantContent({ content, streaming }) {
   )
 }
 
-export default function ChatView({ messages, status, streaming }) {
+export default function ChatView({ messages, status, streaming, showStats }) {
   const scrollRef = useRef(null)
   const stickRef = useRef(true)
 
@@ -93,14 +94,13 @@ export default function ChatView({ messages, status, streaming }) {
               <div key={m.id} className="msg system">
                 <pre className="sys-out">{m.content}</pre>
               </div>
-            ) : m.role === 'stats' ? (
-              <div key={m.id} className="msg stats">
-                <pre className="stats-out">{m.content}</pre>
-              </div>
             ) : (
               <div key={m.id} className="msg assistant">
                 <div className="who">── assistant ─────────────────────────────</div>
                 <AssistantContent content={m.content} streaming={streaming} />
+                {m.stats && showStats && (
+                  <pre className="stats-out">{formatStats(m.stats)}</pre>
+                )}
               </div>
             ),
           )

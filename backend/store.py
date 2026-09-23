@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import sqlite3
@@ -58,6 +59,9 @@ def init_db():
         columns = [r["name"] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()]
         if "context_length" not in columns:
             conn.execute("ALTER TABLE conversations ADD COLUMN context_length INTEGER NOT NULL DEFAULT 0")
+        msg_columns = [r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
+        if "stats" not in msg_columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN stats TEXT")
 
 
 def get_setting(key):
@@ -135,25 +139,34 @@ def delete_conversation(conversation_id):
 def get_messages(conversation_id):
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT id, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY id",
+            "SELECT id, role, content, stats, created_at FROM messages WHERE conversation_id = ? ORDER BY id",
             (conversation_id,),
         ).fetchall()
         return [
-            {"id": r["id"], "role": r["role"], "content": r["content"], "created_at": r["created_at"]}
+            {
+                "id": r["id"],
+                "role": r["role"],
+                "content": r["content"],
+                "stats": json.loads(r["stats"]) if r["stats"] else None,
+                "created_at": r["created_at"],
+            }
             for r in rows
         ]
 
 
-def add_message(conversation_id, role, content):
+def add_message(conversation_id, role, content, stats=None):
     with _connect() as conn:
         cursor = conn.execute(
-            "INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)",
-            (conversation_id, role, content),
+            "INSERT INTO messages (conversation_id, role, content, stats) VALUES (?, ?, ?, ?)",
+            (conversation_id, role, content, json.dumps(stats) if stats else None),
         )
-        row = conn.execute("SELECT id, role, content, created_at FROM messages WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        row = conn.execute(
+            "SELECT id, role, content, stats, created_at FROM messages WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
         return {
             "id": row["id"],
             "role": row["role"],
             "content": row["content"],
+            "stats": json.loads(row["stats"]) if row["stats"] else None,
             "created_at": row["created_at"],
         }

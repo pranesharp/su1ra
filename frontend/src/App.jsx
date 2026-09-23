@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from './api'
 import { applyAccent, DEFAULT_ACCENT } from './theme'
-import { storageGet, storageSet } from './storage'
 import ChatView from './components/ChatView.jsx'
 import Composer from './components/Composer.jsx'
 import Logo from './components/Logo.jsx'
@@ -29,7 +28,7 @@ export default function App() {
   const [streaming, setStreaming] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [accent, setAccent] = useState(DEFAULT_ACCENT)
-  const [showStats, setShowStats] = useState(() => storageGet('su1ra_stats') === '1')
+  const [showStats, setShowStats] = useState(false)
   const abortRef = useRef(null)
   const idRef = useRef(1000)
 
@@ -47,6 +46,7 @@ export default function App() {
       ])
       setStatus(statusRes)
       setAccent(settingsRes.accent || DEFAULT_ACCENT)
+      setShowStats(settingsRes.show_stats === true)
       setModels(modelsRes.models)
       setConversations(convsRes.conversations)
       if (convsRes.conversations.length > 0) {
@@ -66,21 +66,6 @@ export default function App() {
 
   function pushSystem(content, role = 'system') {
     setMessages((prev) => [...prev, { id: ++idRef.current, role, content }])
-  }
-
-  function formatStats(s) {
-    const lines = ['── stats ───────────────────────────']
-    if (s.prompt_tokens) lines.push(`prompt   ${String(s.prompt_tokens).padStart(6)} tk${s.prompt_tps ? ` · ${s.prompt_tps} tk/s` : ''}`)
-    if (s.think_tokens) lines.push(`think    ${String(s.think_tokens).padStart(6)} tk${s.think_tps ? ` · ${s.think_tps} tk/s` : ''}${s.think_time ? ` · ${s.think_time}s` : ''}`)
-    if (s.output_tokens) lines.push(`output   ${String(s.output_tokens).padStart(6)} tk${s.output_tps ? ` · ${s.output_tps} tk/s` : ''}`)
-    const tail = [
-      s.ttft != null ? `ttft ${s.ttft}s` : null,
-      s.total_time ? `total ${s.total_time}s` : null,
-      s.eval_tps ? `avg ${s.eval_tps} tk/s` : null,
-      s.model,
-    ].filter(Boolean).join(' · ')
-    lines.push(tail)
-    return lines.join('\n')
   }
 
   async function selectConversation(id) {
@@ -233,9 +218,9 @@ export default function App() {
     if (cmd === '/stats') {
       const next = !showStats
       setShowStats(next)
-      storageSet('su1ra_stats', next ? '1' : '0')
+      await api.saveSettings({ show_stats: next })
       const line = next
-        ? '// stats display: on — speeds and timings will show under each reply'
+        ? '// stats display: on — timings show under new replies and are saved with each message'
         : '// stats display: off'
       pushSystem(`${echo}\n\n${line}`)
       return
@@ -279,6 +264,9 @@ export default function App() {
           },
           onStats: (s) => {
             replyStats = s
+            setMessages((prev) =>
+              prev.map((m, i) => (i === prev.length - 1 ? { ...m, stats: s } : m)),
+            )
           },
           onError: (error) => {
             if (!partial) {
@@ -297,9 +285,6 @@ export default function App() {
     } finally {
       setStreaming(false)
       abortRef.current = null
-    }
-    if (showStats && replyStats) {
-      pushSystem(formatStats(replyStats), 'stats')
     }
     const convs = await api.getConversations()
     setConversations(convs.conversations)
@@ -346,7 +331,7 @@ export default function App() {
             <span className="meta-model"> · model: {currentModel || 'none'}</span>
           </div>
         </header>
-        <ChatView messages={messages} status={status} streaming={streaming} />
+        <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} />
         <Composer commands={COMMANDS} disabled={!currentModel} streaming={streaming} onSend={send} onStop={stop} />
       </main>
       {settingsOpen && (

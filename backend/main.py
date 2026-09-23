@@ -52,6 +52,7 @@ class ConversationUpdate(BaseModel):
 class SettingsUpdate(BaseModel):
     ollama_url: str | None = None
     accent: str | None = None
+    show_stats: bool | None = None
 
 
 @app.get("/api/status")
@@ -69,12 +70,13 @@ async def get_settings():
     return {
         "ollama_url": store.get_setting("ollama_url") or ollama.DEFAULT_URL,
         "accent": store.get_setting("accent") or "#bf264a",
+        "show_stats": store.get_setting("show_stats") == "1",
     }
 
 
 @app.patch("/api/settings")
 async def update_settings(body: SettingsUpdate):
-    if body.ollama_url is None and body.accent is None:
+    if body.ollama_url is None and body.accent is None and body.show_stats is None:
         raise HTTPException(422, "nothing to update")
     if body.ollama_url is not None:
         if not body.ollama_url.startswith(("http://", "https://")):
@@ -84,10 +86,13 @@ async def update_settings(body: SettingsUpdate):
         if not re.fullmatch(r"#[0-9a-fA-F]{6}", body.accent):
             raise HTTPException(422, "accent must be a hex color like #bf264a")
         store.set_setting("accent", body.accent.lower())
+    if body.show_stats is not None:
+        store.set_setting("show_stats", "1" if body.show_stats else "0")
     return {
         "ok": True,
         "ollama_url": store.get_setting("ollama_url") or ollama.DEFAULT_URL,
         "accent": store.get_setting("accent") or "#bf264a",
+        "show_stats": store.get_setting("show_stats") == "1",
     }
 
 
@@ -180,11 +185,14 @@ async def chat(body: ChatRequest):
     async def generator():
         accumulated = ""
         saved = False
+        captured = {"stats": None}
 
         def save_partial():
             nonlocal saved
             if accumulated.strip() and not saved:
-                store.add_message(body.conversation_id, "assistant", accumulated.strip())
+                store.add_message(
+                    body.conversation_id, "assistant", accumulated.strip(), captured["stats"]
+                )
                 saved = True
 
         try:
@@ -199,6 +207,8 @@ async def chat(body: ChatRequest):
                     save_partial()
                     yield json.dumps(chunk) + "\n"
                     return
+                if "stats" in chunk:
+                    captured["stats"] = chunk["stats"]
                 if "delta" in chunk:
                     accumulated += chunk["delta"]
                 yield json.dumps(chunk) + "\n"
