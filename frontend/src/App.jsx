@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from './api'
 import { applyAccent, DEFAULT_ACCENT } from './theme'
+import { storageGet, storageSet } from './storage'
 import ChatView from './components/ChatView.jsx'
 import Composer from './components/Composer.jsx'
 import Logo from './components/Logo.jsx'
@@ -28,7 +29,7 @@ export default function App() {
   const [streaming, setStreaming] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [accent, setAccent] = useState(DEFAULT_ACCENT)
-  const [showStats, setShowStats] = useState(() => localStorage.getItem('su1ra_stats') === '1')
+  const [showStats, setShowStats] = useState(() => storageGet('su1ra_stats') === '1')
   const abortRef = useRef(null)
   const idRef = useRef(1000)
 
@@ -232,7 +233,7 @@ export default function App() {
     if (cmd === '/stats') {
       const next = !showStats
       setShowStats(next)
-      localStorage.setItem('su1ra_stats', next ? '1' : '0')
+      storageSet('su1ra_stats', next ? '1' : '0')
       const line = next
         ? '// stats display: on — speeds and timings will show under each reply'
         : '// stats display: off'

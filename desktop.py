@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 import sys
@@ -118,25 +119,32 @@ def set_status(window, text):
 def wait_for_backend(window):
     for _ in range(100):
         if backend_ready():
+            print("[su1ra] backend ready", flush=True)
             return True
         time.sleep(0.1)
+    print("[su1ra] backend never became ready", flush=True)
     return False
 
 
 def ensure_ollama(window):
     url = ollama_url()
     if ollama_ready(url):
+        print("[su1ra] ollama detected", flush=True)
         set_status(window, "ollama server detected")
         return True
+    print("[su1ra] starting ollama…", flush=True)
     set_status(window, "starting ollama server…")
     try:
         resp = httpx.post(f"{APP_URL}/api/connect", timeout=70.0)
         data = resp.json()
-    except Exception:
+    except Exception as exc:
+        print(f"[su1ra] /api/connect failed: {exc}", flush=True)
         data = {"ok": False}
     if data.get("ok"):
+        print("[su1ra] ollama is up", flush=True)
         set_status(window, "ollama is up")
         return True
+    print(f"[su1ra] ollama failed: {data.get('error')}", flush=True)
     return False
 
 
@@ -163,10 +171,12 @@ window = webview.create_window(
 def boot():
     ok = wait_for_backend(window) and ensure_ollama(window)
     if ok:
+        print("[su1ra] window -> app", flush=True)
         window.load_url(APP_URL + "/")
     else:
+        print("[su1ra] window -> error screen", flush=True)
         window.load_html(ERROR_HTML)
 
 
 threading.Thread(target=boot, daemon=True).start()
-webview.start()
+webview.start(debug=os.environ.get("SU1RA_DEBUG") == "1")
