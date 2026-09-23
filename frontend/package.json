@@ -9,10 +9,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "katex": "^0.18.9",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.0.0",

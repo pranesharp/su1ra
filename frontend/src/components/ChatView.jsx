@@ -1,6 +1,37 @@
 import { useEffect, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
+import 'katex/dist/katex.min.css'
+
+function displayizeSingleLine(seg) {
+  return seg
+    .split('\n')
+    .map((line) => {
+      const t = line.trim()
+      if (t.length > 4 && t.startsWith('$$') && t.endsWith('$$') && (t.match(/\$\$/g) || []).length === 2) {
+        return `$$\n${t.slice(2, -2)}\n$$`
+      }
+      return line
+    })
+    .join('\n')
+}
+
+function convertMathDelims(text) {
+  return text
+    .split(/```/)
+    .map((seg, i) =>
+      i % 2 === 1
+        ? seg
+        : displayizeSingleLine(
+            seg
+              .replace(/\\\((.+?)\\\)/gs, (_, m) => `$${m}$`)
+              .replace(/\\\[(.+?)\\\]/gs, (_, m) => `$$$$${m}$$$$`),
+          ),
+    )
+    .join('```')
+}
 import { formatStats } from '../statsFormat'
 
 function ThinkBlock({ text }) {
@@ -82,7 +113,8 @@ function AssistantContent({ content, toolCalls, streaming, onLoadToIde }) {
         ) : (
           <div key={i} className="md">
             <Markdown
-              remarkPlugins={[remarkGfm]}
+              remarkPlugins={[remarkGfm, remarkMath]}
+              rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
               components={{
                 code({ className, children, ...props }) {
                   const text = String(children).replace(/\n$/, '')
@@ -107,7 +139,7 @@ function AssistantContent({ content, toolCalls, streaming, onLoadToIde }) {
                 },
               }}
             >
-              {p.text}
+              {convertMathDelims(p.text)}
             </Markdown>
           </div>
         ),
