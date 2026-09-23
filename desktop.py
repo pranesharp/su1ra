@@ -100,6 +100,13 @@ def ollama_ready(url):
 
 
 def find_ollama_binary():
+    if getattr(sys, "frozen", False):
+        bundled = Path(sys.executable).resolve().parent / "ollama"
+    else:
+        bundled = PROJECT_ROOT / "ollama"
+    for name in ("ollama.exe", "ollama"):
+        if (bundled / name).exists():
+            return str(bundled / name)
     found = shutil.which("ollama")
     if found:
         return found
