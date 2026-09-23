@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from './api'
+import { applyAccent, DEFAULT_ACCENT } from './theme'
 import ChatView from './components/ChatView.jsx'
 import Composer from './components/Composer.jsx'
+import Logo from './components/Logo.jsx'
 import SettingsModal from './components/SettingsModal.jsx'
 
 const COMMANDS = [
@@ -24,17 +26,24 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [accent, setAccent] = useState(DEFAULT_ACCENT)
   const abortRef = useRef(null)
   const idRef = useRef(1000)
 
   useEffect(() => {
+    applyAccent(accent)
+  }, [accent])
+
+  useEffect(() => {
     async function boot() {
-      const [statusRes, modelsRes, convsRes] = await Promise.all([
+      const [statusRes, modelsRes, convsRes, settingsRes] = await Promise.all([
         api.getStatus(),
         api.getModels(),
         api.getConversations(),
+        api.getSettings(),
       ])
       setStatus(statusRes)
+      setAccent(settingsRes.accent || DEFAULT_ACCENT)
       setModels(modelsRes.models)
       setConversations(convsRes.conversations)
       if (convsRes.conversations.length > 0) {
@@ -264,9 +273,10 @@ export default function App() {
     abortRef.current?.abort()
   }
 
-  async function saveSettings({ ollamaUrl, systemPrompt, temperature, contextLength }) {
-    await api.saveSettings({ ollama_url: ollamaUrl })
+  async function saveSettings({ ollamaUrl, systemPrompt, temperature, contextLength, accent: newAccent }) {
+    await api.saveSettings({ ollama_url: ollamaUrl, accent: newAccent })
     setStatus(await api.getStatus())
+    setAccent(newAccent)
     if (activeConversation) {
       const updated = await api.updateConversation(activeConversation.id, {
         system_prompt: systemPrompt,
@@ -287,7 +297,7 @@ export default function App() {
       <main className="main">
         <header className="app-header">
           <div className="brand-line">
-            <span className="brand-mark" />
+            <Logo size={20} />
             <span className="brand">Su1ra</span>
             <span className="brand-ver">v0.1.0</span>
             <span className={`status-tag${status?.ok ? ' ok' : ''}`}>
@@ -307,6 +317,7 @@ export default function App() {
         <SettingsModal
           status={status}
           conversation={activeConversation}
+          accent={accent}
           onSave={saveSettings}
           onClose={() => setSettingsOpen(false)}
         />

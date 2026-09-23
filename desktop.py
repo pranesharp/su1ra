@@ -25,19 +25,22 @@ LOADING_HTML = """<!doctype html>
     color: #d6d6d6; display: flex; align-items: center; justify-content: center;
     font-size: 14px; line-height: 1.7;
   }
-  .mark { display: inline-block; width: 10px; height: 10px; background: #bf264a; margin-right: 12px; }
+  .logo-row { display: flex; align-items: center; gap: 12px; }
   .brand { font-weight: 700; letter-spacing: 0.5px; }
-  .ver { color: #6b6b72; font-size: 11px; margin-left: 10px; }
+  .ver { color: #6b6b72; font-size: 11px; margin-left: 2px; }
   #status { margin-top: 14px; color: #8b8b92; font-size: 12.5px; }
-  #status::before { content: '> '; color: #bf264a; }
-  .cursor { display: inline-block; width: 8px; height: 14px; background: #bf264a;
+  #status::before { content: '> '; color: __ACCENT__; }
+  .cursor { display: inline-block; width: 8px; height: 14px; background: __ACCENT__;
             vertical-align: text-bottom; animation: blink 1.1s steps(2, start) infinite; }
   @keyframes blink { to { visibility: hidden; } }
 </style>
 </head>
 <body>
   <div>
-    <div><span class="mark"></span><span class="brand">Su1ra</span><span class="ver">v0.1.0</span></div>
+    <div class="logo-row">
+      <svg width="34" height="34" viewBox="0 0 128 128"><rect x="3" y="3" width="122" height="122" rx="20" fill="#0b0b0e" stroke="#26262c" stroke-width="5"/><rect x="32" y="32" width="64" height="64" fill="__ACCENT__"/><text x="64" y="67" text-anchor="middle" dominant-baseline="middle" font-family="monospace" font-weight="800" font-size="36" fill="#ffffff">1s</text></svg>
+      <span class="brand">Su1ra</span><span class="ver">v0.1.0</span>
+    </div>
     <div id="status">starting api server<span class="cursor"></span></div>
   </div>
   <script>
@@ -142,9 +145,14 @@ if not backend_ready():
 
 import webview
 
+import store as su1ra_store
+
+su1ra_store.init_db()
+accent = su1ra_store.get_setting("accent") or "#bf264a"
+
 window = webview.create_window(
     "Su1ra",
-    html=LOADING_HTML,
+    html=LOADING_HTML.replace("__ACCENT__", accent),
     width=1280,
     height=820,
     min_size=(760, 560),

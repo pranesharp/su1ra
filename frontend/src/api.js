@@ -22,6 +22,8 @@ export const getStatus = () => getJSON('/api/status')
 
 export const getModels = () => getJSON('/api/models')
 
+export const getSettings = () => getJSON('/api/settings')
+
 export const getConversations = () => getJSON('/api/conversations')
 
 export const getConversation = (id) => getJSON(`/api/conversations/${id}`)

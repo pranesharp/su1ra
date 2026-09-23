@@ -1,3 +1,9 @@
+@font-face {
+  font-family: 'Asset';
+  src: url('/fonts/Asset-Regular.woff2') format('woff2');
+  font-display: swap;
+}
+
 :root {
   --bg: #0b0b0e;
   --panel: #08080a;
@@ -79,7 +85,7 @@ button {
 
 .term-btn.accent {
   color: var(--accent-bright);
-  border-color: rgba(191, 38, 74, 0.55);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 .term-btn.accent:hover:not(:disabled) {
@@ -102,16 +108,10 @@ button {
   gap: 10px;
 }
 
-.brand-mark {
-  width: 10px;
-  height: 10px;
-  background: var(--accent);
-  flex-shrink: 0;
-}
-
 .brand {
-  font-weight: 700;
-  font-size: 15px;
+  font-family: 'Asset', var(--mono);
+  font-weight: 400;
+  font-size: 17px;
   letter-spacing: 0.5px;
 }
 
@@ -582,6 +582,74 @@ button {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 20px;
+}
+
+/* ---------- Accent swatches ---------- */
+
+.swatch-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 0 2px;
+}
+
+.swatch {
+  width: 30px;
+  height: 30px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: transform 0.1s ease, box-shadow 0.12s ease;
+}
+
+.swatch:hover {
+  transform: translateY(-2px);
+}
+
+.swatch.selected {
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--text);
+}
+
+/* ---------- Context slider ---------- */
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ctx-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  outline: none;
+}
+
+.ctx-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 3px;
+  background: var(--accent);
+  border: 2px solid #0b0b0e;
+  box-shadow: 0 0 0 1.5px var(--accent);
+  cursor: pointer;
+}
+
+.slider-value {
+  min-width: 76px;
+  text-align: right;
+  font-size: 13px;
+  color: var(--accent-bright);
+}
+
+.slider-scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: var(--faint);
+  margin-top: 2px;
 }
 
 /* ---------- Scrollbars ---------- */

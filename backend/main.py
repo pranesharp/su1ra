@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -49,7 +50,8 @@ class ConversationUpdate(BaseModel):
 
 
 class SettingsUpdate(BaseModel):
-    ollama_url: str
+    ollama_url: str | None = None
+    accent: str | None = None
 
 
 @app.get("/api/status")
@@ -64,15 +66,29 @@ async def models():
 
 @app.get("/api/settings")
 async def get_settings():
-    return {"ollama_url": store.get_setting("ollama_url") or ollama.DEFAULT_URL}
+    return {
+        "ollama_url": store.get_setting("ollama_url") or ollama.DEFAULT_URL,
+        "accent": store.get_setting("accent") or "#bf264a",
+    }
 
 
 @app.patch("/api/settings")
 async def update_settings(body: SettingsUpdate):
-    if not body.ollama_url.startswith(("http://", "https://")):
-        raise HTTPException(422, "ollama_url must start with http:// or https://")
-    store.set_setting("ollama_url", body.ollama_url.rstrip("/"))
-    return {"ok": True, "ollama_url": body.ollama_url.rstrip("/")}
+    if body.ollama_url is None and body.accent is None:
+        raise HTTPException(422, "nothing to update")
+    if body.ollama_url is not None:
+        if not body.ollama_url.startswith(("http://", "https://")):
+            raise HTTPException(422, "ollama_url must start with http:// or https://")
+        store.set_setting("ollama_url", body.ollama_url.rstrip("/"))
+    if body.accent is not None:
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", body.accent):
+            raise HTTPException(422, "accent must be a hex color like #bf264a")
+        store.set_setting("accent", body.accent.lower())
+    return {
+        "ok": True,
+        "ollama_url": store.get_setting("ollama_url") or ollama.DEFAULT_URL,
+        "accent": store.get_setting("accent") or "#bf264a",
+    }
 
 
 @app.post("/api/eject")
