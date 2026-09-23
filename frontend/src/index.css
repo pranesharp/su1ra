@@ -435,6 +435,15 @@ button {
   color: var(--accent-bright);
 }
 
+.chat-link {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.chat-link:hover {
+  color: var(--accent-bright);
+}
+
 /* ---------- Blinking cursor ---------- */
 
 .cursor {

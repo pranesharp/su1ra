@@ -80,6 +80,23 @@ function ToolOutputBlock({ content }) {
   )
 }
 
+function Linkified({ text }) {
+  const parts = text.split(/(https?:\/\/[^\s)]+)/g)
+  return (
+    <pre className="sys-out">
+      {parts.map((p, i) =>
+        /^https?:\/\//.test(p) ? (
+          <a key={i} className="chat-link" href={p} target="_blank" rel="noreferrer">
+            {p}
+          </a>
+        ) : (
+          p
+        ),
+      )}
+    </pre>
+  )
+}
+
 export function splitThinking(content) {
   const parts = []
   let rest = content
@@ -193,7 +210,7 @@ export default function ChatView({ messages, status, streaming, showStats, onLoa
               </div>
             ) : m.role === 'system' ? (
               <div key={m.id} className="msg system">
-                <pre className="sys-out">{m.content}</pre>
+                <Linkified text={m.content} />
               </div>
             ) : m.role === 'tool' ? (
               <div key={m.id} className="msg tool-msg">

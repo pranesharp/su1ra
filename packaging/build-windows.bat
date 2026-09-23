@@ -2,6 +2,7 @@
 REM Run from the repo root on Windows, inside the venv:
 REM   .venv\Scripts\activate
 REM   packaging\build-windows.bat
+REM Requires Inno Setup 6.3+ (the Ollama download task uses the download flag).
 setlocal
 cd /d "%~dp0.."
 

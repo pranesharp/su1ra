@@ -9,7 +9,7 @@ import IdePane from './components/IdePane.jsx'
 
 const COMMANDS = [
   { cmd: '/help', desc: 'show available commands' },
-  { cmd: '/models', desc: 'list models — /models <name|n> to select' },
+  { cmd: '/models', desc: 'list models — /models <name|n> to select, /models get [query] to browse the library' },
   { cmd: '/newchat', desc: 'start a new conversation' },
   { cmd: '/chats', desc: 'list chats — /chats <n|id> to open' },
   { cmd: '/delchat', desc: 'delete a chat — /delchat <n|id>' },
@@ -160,6 +160,12 @@ export default function App() {
     }
 
     if (cmd === '/models') {
+      if (arg === 'get' || arg.startsWith('get ')) {
+        const query = arg.slice(3).trim()
+        const url = query ? `https://ollama.com/search?q=${encodeURIComponent(query)}` : 'https://ollama.com/search'
+        pushSystem(`${echo}\n\n// browse the ollama model library:\n${url}`)
+        return
+      }
       if (!arg) {
         const lines = models.map((m, i) => `${String(i + 1).padStart(2)}. ${m.name.padEnd(24)} ${sizeLabel(m.size)}`)
         pushSystem(
