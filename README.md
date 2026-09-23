@@ -85,3 +85,7 @@ packaging\build-windows.bat
 ## Data
 
 Everything lives in `~/.local/share/su1ra/` (SQLite history, settings, IDE scratch). Delete it for a factory reset.
+
+## License
+
+Su1ra is MIT-licensed. Bundled third-party components and their licenses are listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
