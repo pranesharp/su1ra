@@ -43,6 +43,7 @@ export default function App() {
   const [ideOutput, setIdeOutput] = useState({ lines: [], exitCode: null })
   const abortRef = useRef(null)
   const pendingToolRef = useRef(null)
+  const ideRunSeenRef = useRef(null)
   const idRef = useRef(1000)
   const widthRef = useRef(460)
   const moveRef = useRef(null)
@@ -267,6 +268,18 @@ export default function App() {
     pushSystem(`${echo}\n\n// unknown command: ${cmd} — try /help`)
   }
 
+  function attachIdeRun(text) {
+    const finished =
+      ideOutput.exitCode !== null && ideOutput.lines.length > 0 && ideOutput !== ideRunSeenRef.current
+    if (!finished) return text
+    ideRunSeenRef.current = ideOutput
+    const out = ideOutput.lines.map((l) => l.text).join('\n')
+    const status = ideOutput.exitCode === -1 ? 'killed' : `exit ${ideOutput.exitCode}`
+    const parts = [text, '', `// attached: ide run (${status})`, '', '```python', ideCode, '```']
+    if (out.trim()) parts.push('', 'output:', '', '```', out, '```')
+    return parts.join('\n')
+  }
+
   async function send(content) {
     const trimmed = content.trim()
     if (!trimmed || streaming) return
@@ -274,6 +287,7 @@ export default function App() {
       await handleCommand(trimmed)
       return
     }
+    const outgoing = attachIdeRun(trimmed)
     if (!selectedModel) return
     let convId = activeId
     if (!activeConversation) {
@@ -282,7 +296,7 @@ export default function App() {
       setConversations((prev) => [conversation, ...prev])
       setActiveId(convId)
     }
-    const userMsg = { id: ++idRef.current, role: 'user', content: trimmed }
+    const userMsg = { id: ++idRef.current, role: 'user', content: outgoing }
     const assistantMsg = { id: ++idRef.current, role: 'assistant', content: '' }
     setMessages((prev) => [...prev, userMsg, assistantMsg])
     setStreaming(true)
@@ -292,7 +306,7 @@ export default function App() {
     let replyStats = null
     try {
       await api.streamChat(
-        { conversation_id: convId, content: trimmed, model: selectedModel },
+        { conversation_id: convId, content: outgoing, model: selectedModel },
         {
           onDelta: (delta) => {
             partial += delta
@@ -373,6 +387,7 @@ export default function App() {
   }
 
   function sendIdeToChat() {
+    ideRunSeenRef.current = ideOutput
     const { lines, exitCode } = ideOutput
     const out = lines.map((l) => l.text).join('\n')
     const status = exitCode === null ? 'not run' : exitCode === -1 ? 'killed' : `exit ${exitCode}`

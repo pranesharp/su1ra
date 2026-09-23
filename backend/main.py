@@ -313,6 +313,13 @@ async def chat(body: ChatRequest):
         store.update_conversation(body.conversation_id, title=content[:60])
     history = build_history(store.get_messages(body.conversation_id))
     tools = TOOLS if await ollama.model_supports_tools(model) else None
+    sys_prompt = conversation["system_prompt"]
+    if tools:
+        directive = (
+            "You have the run_python tool. Use it proactively whenever the task involves "
+            "computation, running code, or checking output — call it instead of guessing results."
+        )
+        sys_prompt = f"{sys_prompt}\n\n{directive}" if sys_prompt.strip() else directive
 
     async def generator():
         working = list(history)
@@ -342,7 +349,7 @@ async def chat(body: ChatRequest):
                 async for chunk in ollama.stream_chat(
                     model,
                     working,
-                    conversation["system_prompt"],
+                    sys_prompt,
                     conversation["temperature"],
                     conversation["context_length"],
                     tools=tools if with_tools else None,
