@@ -93,6 +93,10 @@ export default function ChatView({ messages, status, streaming }) {
               <div key={m.id} className="msg system">
                 <pre className="sys-out">{m.content}</pre>
               </div>
+            ) : m.role === 'stats' ? (
+              <div key={m.id} className="msg stats">
+                <pre className="stats-out">{m.content}</pre>
+              </div>
             ) : (
               <div key={m.id} className="msg assistant">
                 <div className="who">── assistant ─────────────────────────────</div>

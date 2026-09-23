@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import httpx
@@ -87,6 +88,13 @@ async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ct
         "stream": True,
         "options": options,
     }
+    t0 = time.perf_counter()
+    ttft = None
+    t_first_content = None
+    think_start = None
+    think_end = None
+    think_tokens = 0
+    output_tokens = 0
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=5.0)) as client:
             async with client.stream("POST", f"{base}/api/chat", json=payload) as resp:
@@ -109,20 +117,51 @@ async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ct
                     msg = obj.get("message") or {}
                     thinking = msg.get("thinking") or ""
                     content = msg.get("content") or ""
+                    now = time.perf_counter()
+                    if ttft is None and (thinking or content):
+                        ttft = now - t0
                     if thinking:
                         if not saw_thinking:
                             saw_thinking = True
                             yield {"delta": "<think>\n"}
+                        think_tokens += 1
+                        if think_start is None:
+                            think_start = now
                         yield {"delta": thinking}
                     if content:
-                        if saw_thinking and not content.lstrip().startswith("<think>"):
+                        if saw_thinking:
+                            if think_end is None:
+                                think_end = now
                             saw_thinking = False
                             yield {"delta": "\n</think>\n\n"}
+                        output_tokens += 1
+                        if t_first_content is None:
+                            t_first_content = now
                         yield {"delta": content}
                     if obj.get("done"):
                         if saw_thinking:
                             yield {"delta": "\n</think>"}
-                        yield {"done": True, "eval_count": obj.get("eval_count")}
+                        prompt_count = obj.get("prompt_eval_count") or 0
+                        prompt_dur = obj.get("prompt_eval_duration") or 0
+                        eval_count = obj.get("eval_count") or 0
+                        eval_dur = obj.get("eval_duration") or 0
+                        output_span = now - t_first_content if t_first_content else 0
+                        stats = {
+                            "model": model,
+                            "prompt_tokens": prompt_count,
+                            "prompt_tps": round(prompt_count / (prompt_dur / 1e9), 1) if prompt_count and prompt_dur else None,
+                            "ttft": round(ttft, 2) if ttft is not None else None,
+                            "think_tokens": think_tokens,
+                            "think_tps": round(think_tokens / (think_end - think_start), 1) if think_tokens and think_start and think_end else None,
+                            "think_time": round(think_end - think_start, 2) if think_start and think_end else None,
+                            "output_tokens": output_tokens,
+                            "output_tps": round(output_tokens / output_span, 1) if output_tokens and output_span > 0 else None,
+                            "total_time": round(now - t0, 2),
+                            "eval_count": eval_count,
+                            "eval_tps": round(eval_count / (eval_dur / 1e9), 1) if eval_count and eval_dur else None,
+                        }
+                        yield {"stats": stats}
+                        yield {"done": True, "eval_count": eval_count}
                         return
     except httpx.HTTPError as exc:
         yield {"error": f"Cannot reach Ollama server at {base} ({exc.__class__.__name__})"}

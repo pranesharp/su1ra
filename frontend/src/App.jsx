@@ -15,6 +15,7 @@ const COMMANDS = [
   { cmd: '/settings', desc: 'open settings' },
   { cmd: '/eject', desc: 'shut down the ollama server instantly' },
   { cmd: '/connect', desc: 'start / reconnect the ollama server' },
+  { cmd: '/stats', desc: 'toggle per-reply performance stats' },
 ]
 
 export default function App() {
@@ -27,6 +28,7 @@ export default function App() {
   const [streaming, setStreaming] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [accent, setAccent] = useState(DEFAULT_ACCENT)
+  const [showStats, setShowStats] = useState(() => localStorage.getItem('su1ra_stats') === '1')
   const abortRef = useRef(null)
   const idRef = useRef(1000)
 
@@ -61,8 +63,23 @@ export default function App() {
   const activeConversation = conversations.find((c) => c.id === activeId) || null
   const blocked = streaming
 
-  function pushSystem(content) {
-    setMessages((prev) => [...prev, { id: ++idRef.current, role: 'system', content }])
+  function pushSystem(content, role = 'system') {
+    setMessages((prev) => [...prev, { id: ++idRef.current, role, content }])
+  }
+
+  function formatStats(s) {
+    const lines = ['── stats ───────────────────────────']
+    if (s.prompt_tokens) lines.push(`prompt   ${String(s.prompt_tokens).padStart(6)} tk${s.prompt_tps ? ` · ${s.prompt_tps} tk/s` : ''}`)
+    if (s.think_tokens) lines.push(`think    ${String(s.think_tokens).padStart(6)} tk${s.think_tps ? ` · ${s.think_tps} tk/s` : ''}${s.think_time ? ` · ${s.think_time}s` : ''}`)
+    if (s.output_tokens) lines.push(`output   ${String(s.output_tokens).padStart(6)} tk${s.output_tps ? ` · ${s.output_tps} tk/s` : ''}`)
+    const tail = [
+      s.ttft != null ? `ttft ${s.ttft}s` : null,
+      s.total_time ? `total ${s.total_time}s` : null,
+      s.eval_tps ? `avg ${s.eval_tps} tk/s` : null,
+      s.model,
+    ].filter(Boolean).join(' · ')
+    lines.push(tail)
+    return lines.join('\n')
   }
 
   async function selectConversation(id) {
@@ -212,6 +229,17 @@ export default function App() {
       return
     }
 
+    if (cmd === '/stats') {
+      const next = !showStats
+      setShowStats(next)
+      localStorage.setItem('su1ra_stats', next ? '1' : '0')
+      const line = next
+        ? '// stats display: on — speeds and timings will show under each reply'
+        : '// stats display: off'
+      pushSystem(`${echo}\n\n${line}`)
+      return
+    }
+
     pushSystem(`${echo}\n\n// unknown command: ${cmd} — try /help`)
   }
 
@@ -237,6 +265,7 @@ export default function App() {
     const controller = new AbortController()
     abortRef.current = controller
     let partial = ''
+    let replyStats = null
     try {
       await api.streamChat(
         { conversation_id: convId, content: trimmed, model: selectedModel },
@@ -246,6 +275,9 @@ export default function App() {
             setMessages((prev) =>
               prev.map((m, i) => (i === prev.length - 1 ? { ...m, content: m.content + delta } : m)),
             )
+          },
+          onStats: (s) => {
+            replyStats = s
           },
           onError: (error) => {
             if (!partial) {
@@ -264,6 +296,9 @@ export default function App() {
     } finally {
       setStreaming(false)
       abortRef.current = null
+    }
+    if (showStats && replyStats) {
+      pushSystem(formatStats(replyStats), 'stats')
     }
     const convs = await api.getConversations()
     setConversations(convs.conversations)

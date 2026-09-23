@@ -80,6 +80,7 @@ export async function streamChat(body, handlers, signal) {
         return
       }
       if (obj.delta) handlers.onDelta(obj.delta)
+      if (obj.stats) handlers.onStats?.(obj.stats)
       if (obj.done) {
         handlers.onDone()
         return
