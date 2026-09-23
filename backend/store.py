@@ -62,6 +62,8 @@ def init_db():
         msg_columns = [r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
         if "stats" not in msg_columns:
             conn.execute("ALTER TABLE messages ADD COLUMN stats TEXT")
+        if "tool_calls" not in msg_columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT")
 
 
 def get_setting(key):
@@ -139,7 +141,7 @@ def delete_conversation(conversation_id):
 def get_messages(conversation_id):
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT id, role, content, stats, created_at FROM messages WHERE conversation_id = ? ORDER BY id",
+            "SELECT id, role, content, stats, tool_calls, created_at FROM messages WHERE conversation_id = ? ORDER BY id",
             (conversation_id,),
         ).fetchall()
         return [
@@ -148,25 +150,27 @@ def get_messages(conversation_id):
                 "role": r["role"],
                 "content": r["content"],
                 "stats": json.loads(r["stats"]) if r["stats"] else None,
+                "tool_calls": json.loads(r["tool_calls"]) if r["tool_calls"] else None,
                 "created_at": r["created_at"],
             }
             for r in rows
         ]
 
 
-def add_message(conversation_id, role, content, stats=None):
+def add_message(conversation_id, role, content, stats=None, tool_calls=None):
     with _connect() as conn:
         cursor = conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, stats) VALUES (?, ?, ?, ?)",
-            (conversation_id, role, content, json.dumps(stats) if stats else None),
+            "INSERT INTO messages (conversation_id, role, content, stats, tool_calls) VALUES (?, ?, ?, ?, ?)",
+            (conversation_id, role, content, json.dumps(stats) if stats else None, json.dumps(tool_calls) if tool_calls else None),
         )
         row = conn.execute(
-            "SELECT id, role, content, stats, created_at FROM messages WHERE id = ?", (cursor.lastrowid,)
+            "SELECT id, role, content, stats, tool_calls, created_at FROM messages WHERE id = ?", (cursor.lastrowid,)
         ).fetchone()
         return {
             "id": row["id"],
             "role": row["role"],
             "content": row["content"],
             "stats": json.loads(row["stats"]) if row["stats"] else None,
+            "tool_calls": json.loads(row["tool_calls"]) if row["tool_calls"] else None,
             "created_at": row["created_at"],
         }

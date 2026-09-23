@@ -42,6 +42,7 @@ export default function App() {
   const [ideCode, setIdeCode] = useState(STARTER_CODE)
   const [ideOutput, setIdeOutput] = useState({ lines: [], exitCode: null })
   const abortRef = useRef(null)
+  const pendingToolRef = useRef(null)
   const idRef = useRef(1000)
   const widthRef = useRef(460)
   const moveRef = useRef(null)
@@ -304,6 +305,32 @@ export default function App() {
             setMessages((prev) =>
               prev.map((m, i) => (i === prev.length - 1 ? { ...m, stats: s } : m)),
             )
+          },
+          onToolStart: (t) => {
+            const id = ++idRef.current
+            pendingToolRef.current = id
+            setMessages((prev) => [...prev, { id, role: 'system', content: `// running tool: ${t.name} …` }])
+          },
+          onTool: (t) => {
+            const nextAssistantId = ++idRef.current
+            setMessages((prev) => {
+              const base = prev.filter((m) => m.id !== pendingToolRef.current)
+              const next = base.map((m, i) =>
+                i === base.length - 1 && m.role === 'assistant'
+                  ? {
+                      ...m,
+                      content: t.replaces_text ? '' : m.content,
+                      tool_calls: [
+                        ...(m.tool_calls || []),
+                        { function: { name: t.name, arguments: { code: t.code } } },
+                      ],
+                    }
+                  : m,
+              )
+              next.push({ id: t.id, role: 'tool', content: t.output })
+              next.push({ id: nextAssistantId, role: 'assistant', content: '' })
+              return next
+            })
           },
           onError: (error) => {
             if (!partial) {

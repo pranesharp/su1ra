@@ -388,6 +388,53 @@ button {
   overflow-wrap: anywhere;
 }
 
+/* ---------- Tool blocks ---------- */
+
+.tool {
+  border-left: 2px solid #3a3a41;
+  padding: 4px 12px;
+  margin: 0 0 12px;
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.tool-label {
+  color: var(--muted);
+  font-size: 10.5px;
+  letter-spacing: 0.6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tool-label:hover {
+  color: var(--accent-bright);
+}
+
+.tool-code pre,
+.tool-out {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.tool-load {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  cursor: pointer;
+  padding: 0;
+  margin-top: 6px;
+}
+
+.tool-load:hover {
+  color: var(--accent-bright);
+}
+
 /* ---------- Blinking cursor ---------- */
 
 .cursor {

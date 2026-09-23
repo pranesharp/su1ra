@@ -18,6 +18,25 @@ def base_url():
     return url.rstrip("/")
 
 
+_capabilities_cache = {}
+
+
+async def model_supports_tools(model):
+    if model in _capabilities_cache:
+        return _capabilities_cache[model]
+    base = base_url()
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(f"{base}/api/show", json={"model": model})
+            resp.raise_for_status()
+            caps = resp.json().get("capabilities") or []
+    except Exception:
+        return False
+    supported = "tools" in caps
+    _capabilities_cache[model] = supported
+    return supported
+
+
 async def server_status():
     base = base_url()
     try:
@@ -74,7 +93,7 @@ async def list_models():
         return []
 
 
-async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ctx=0):
+async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ctx=0, tools=None):
     base = base_url()
     payload_messages = (
         [{"role": "system", "content": system_prompt}] if system_prompt.strip() else []
@@ -88,6 +107,8 @@ async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ct
         "stream": True,
         "options": options,
     }
+    if tools:
+        payload["tools"] = tools
     t0 = time.perf_counter()
     ttft = None
     t_first_content = None
@@ -115,6 +136,9 @@ async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ct
                         yield {"error": obj["error"]}
                         return
                     msg = obj.get("message") or {}
+                    tool_calls = msg.get("tool_calls") or []
+                    if tool_calls:
+                        yield {"tool_calls": tool_calls}
                     thinking = msg.get("thinking") or ""
                     content = msg.get("content") or ""
                     now = time.perf_counter()

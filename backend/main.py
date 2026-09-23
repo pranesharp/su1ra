@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 import ollama
+import runner
 import store
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -29,6 +30,107 @@ app.add_middleware(
 )
 
 RUN_STDIN = {}
+
+MAX_TOOL_ROUNDS = 3
+MAX_RESULT_CHARS = 12000
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_python",
+            "description": "Execute Python code and return its stdout and stderr. Use this to run, test, or verify Python code. Execution is non-interactive: input() does not work. Keep code self-contained and print the results you want to see.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "The Python code to execute"}
+                },
+                "required": ["code"],
+            },
+        },
+    }
+]
+
+
+def build_history(rows):
+    out = []
+    for m in rows:
+        entry = {"role": m["role"], "content": m["content"]}
+        if m.get("tool_calls"):
+            entry["tool_calls"] = m["tool_calls"]
+        out.append(entry)
+    return out
+
+
+def accumulate_tool_calls(acc, incoming):
+    for tc in incoming:
+        fn = tc.get("function") or {}
+        name = fn.get("name") or ""
+        args = fn.get("arguments")
+        if (
+            acc
+            and acc[-1]["name"] == name
+            and isinstance(args, str)
+            and isinstance(acc[-1]["args"], str)
+        ):
+            acc[-1]["args"] += args
+        else:
+            acc.append({"name": name, "args": args if isinstance(args, (str, dict)) else {}})
+    return acc
+
+
+def finalize_tool_call(entry):
+    args = entry["args"]
+    if isinstance(args, str):
+        try:
+            args = json.loads(args) if args.strip() else {}
+        except json.JSONDecodeError:
+            args = {"code": args}
+    if not isinstance(args, dict):
+        args = {}
+    return {"function": {"name": entry["name"], "arguments": args}}
+
+
+def detect_content_tool_call(text):
+    body = text.strip()
+    if "<tool_call>" in body:
+        body = body.replace("<tool_call>", "").replace("<" + "/tool_call>", "").strip()
+    if body.startswith("```"):
+        lines = body.splitlines()
+        if len(lines) >= 2:
+            body = "\n".join(lines[1:-1]).strip()
+    if not body.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    if isinstance(parsed.get("function"), dict):
+        name = parsed["function"].get("name")
+        raw_args = parsed["function"].get("arguments")
+    else:
+        name = parsed.get("name")
+        raw_args = parsed.get("arguments")
+    if name not in {t["function"]["name"] for t in TOOLS}:
+        return None
+    return {"name": name, "args": raw_args}
+
+
+def tool_result_text(result):
+    out = result["output"]
+    if len(out) > MAX_RESULT_CHARS:
+        out = out[:4000] + "\n...[output truncated]...\n" + out[-8000:]
+    if result["timed_out"]:
+        status = "killed: 30s timeout"
+    elif result["capped"]:
+        status = f"exit {result['exit']} — output truncated, process killed"
+    else:
+        status = f"exit {result['exit']}"
+    if not out.strip():
+        return f"[no output — {status}]"
+    return f"{out}\n[{status}]"
 
 
 class ChatRequest(BaseModel):
@@ -209,44 +311,100 @@ async def chat(body: ChatRequest):
     store.add_message(body.conversation_id, "user", content)
     if not conversation["title"]:
         store.update_conversation(body.conversation_id, title=content[:60])
-    history = [
-        {"role": m["role"], "content": m["content"]}
-        for m in store.get_messages(body.conversation_id)
-    ]
+    history = build_history(store.get_messages(body.conversation_id))
+    tools = TOOLS if await ollama.model_supports_tools(model) else None
 
     async def generator():
-        accumulated = ""
-        saved = False
-        captured = {"stats": None}
+        working = list(history)
 
-        def save_partial():
-            nonlocal saved
-            if accumulated.strip() and not saved:
+        for round_idx in range(MAX_TOOL_ROUNDS + 1):
+            with_tools = round_idx < MAX_TOOL_ROUNDS
+            text = ""
+            stats = None
+            pending_calls = []
+            saved = False
+            consumed = False
+
+            def save():
+                nonlocal saved
+                if saved or (not text.strip() and not pending_calls):
+                    return
                 store.add_message(
-                    body.conversation_id, "assistant", accumulated.strip(), captured["stats"]
+                    body.conversation_id,
+                    "assistant",
+                    "" if consumed else text.strip(),
+                    stats,
+                    tool_calls=[finalize_tool_call(tc) for tc in pending_calls] if pending_calls else None,
                 )
                 saved = True
 
-        try:
-            async for chunk in ollama.stream_chat(
-                model,
-                history,
-                conversation["system_prompt"],
-                conversation["temperature"],
-                conversation["context_length"],
-            ):
-                if "error" in chunk:
-                    save_partial()
+            try:
+                async for chunk in ollama.stream_chat(
+                    model,
+                    working,
+                    conversation["system_prompt"],
+                    conversation["temperature"],
+                    conversation["context_length"],
+                    tools=tools if with_tools else None,
+                ):
+                    if "error" in chunk:
+                        save()
+                        yield json.dumps(chunk) + "\n"
+                        return
+                    if "tool_calls" in chunk:
+                        accumulate_tool_calls(pending_calls, chunk["tool_calls"])
+                        continue
+                    if "stats" in chunk:
+                        stats = chunk["stats"]
+                    if "done" in chunk:
+                        continue
+                    if "delta" in chunk:
+                        text += chunk["delta"]
                     yield json.dumps(chunk) + "\n"
-                    return
-                if "stats" in chunk:
-                    captured["stats"] = chunk["stats"]
-                if "delta" in chunk:
-                    accumulated += chunk["delta"]
-                yield json.dumps(chunk) + "\n"
-            save_partial()
-        finally:
-            save_partial()
+                if with_tools and tools and not pending_calls:
+                    detected = detect_content_tool_call(text)
+                    if detected:
+                        pending_calls.append(detected)
+                        consumed = True
+            finally:
+                save()
+
+            if not pending_calls:
+                eval_count = stats["eval_count"] if stats else 0
+                yield json.dumps({"done": True, "eval_count": eval_count}) + "\n"
+                return
+
+            finalized = [finalize_tool_call(tc) for tc in pending_calls]
+            working.append({"role": "assistant", "content": "" if consumed else text.strip(), "tool_calls": finalized})
+            for call in finalized:
+                name = call["function"]["name"]
+                arguments = call["function"]["arguments"]
+                code = str(arguments.get("code") or "") if name == "run_python" else ""
+                yield json.dumps({"tool_start": {"name": name}}) + "\n"
+                if name != "run_python":
+                    result = None
+                    result_text = f"Unknown tool: {name}. The only available tool is run_python."
+                else:
+                    try:
+                        result = await runner.run_python(code)
+                        result_text = tool_result_text(result)
+                    except Exception as exc:
+                        result = None
+                        result_text = f"[execution error: {exc}]"
+                row = store.add_message(body.conversation_id, "tool", result_text)
+                working.append({"role": "tool", "content": result_text})
+                yield json.dumps(
+                    {
+                        "tool": {
+                            "name": name,
+                            "code": code,
+                            "output": result_text,
+                            "id": row["id"],
+                            "exit": result["exit"] if result else None,
+                            "replaces_text": consumed,
+                        }
+                    }
+                ) + "\n"
 
     return StreamingResponse(generator(), media_type="application/x-ndjson")
 

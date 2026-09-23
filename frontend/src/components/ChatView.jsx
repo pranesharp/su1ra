@@ -15,6 +15,40 @@ function ThinkBlock({ text }) {
   )
 }
 
+function ToolBlock({ name, code, onLoadToIde }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="tool">
+      <div className="tool-label" onClick={() => setOpen((v) => !v)}>
+        {open ? '▾' : '▸'} tool: {name} · {code.split('\n').length} lines
+      </div>
+      {open && (
+        <div className="tool-code">
+          <button className="tool-load" onClick={() => onLoadToIde && onLoadToIde(code)}>
+            [ load to ide ]
+          </button>
+          <pre>
+            <code>{code}</code>
+          </pre>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ToolOutputBlock({ content }) {
+  const lines = content.split('\n')
+  const [open, setOpen] = useState(lines.length <= 12)
+  return (
+    <div className="tool">
+      <div className="tool-label" onClick={() => setOpen((v) => !v)}>
+        {open ? '▾' : '▸'} tool output · {lines.length} lines
+      </div>
+      {open && <pre className="tool-out">{content}</pre>}
+    </div>
+  )
+}
+
 function splitThinking(content) {
   const parts = []
   let rest = content
@@ -37,8 +71,8 @@ function splitThinking(content) {
   return parts
 }
 
-function AssistantContent({ content, streaming, onLoadToIde }) {
-  if (!content) return streaming ? <span className="cursor" /> : null
+function AssistantContent({ content, toolCalls, streaming, onLoadToIde }) {
+  if (!content && !(toolCalls || []).length) return streaming ? <span className="cursor" /> : null
   const parts = splitThinking(content)
   return (
     <>
@@ -78,6 +112,14 @@ function AssistantContent({ content, streaming, onLoadToIde }) {
           </div>
         ),
       )}
+      {(toolCalls || []).map((tc, i) => (
+        <ToolBlock
+          key={`tool-${i}`}
+          name={tc?.function?.name || 'tool'}
+          code={tc?.function?.arguments?.code || ''}
+          onLoadToIde={onLoadToIde}
+        />
+      ))}
       {streaming && <span className="cursor" />}
     </>
   )
@@ -121,10 +163,14 @@ export default function ChatView({ messages, status, streaming, showStats, onLoa
               <div key={m.id} className="msg system">
                 <pre className="sys-out">{m.content}</pre>
               </div>
+            ) : m.role === 'tool' ? (
+              <div key={m.id} className="msg tool-msg">
+                <ToolOutputBlock content={m.content} />
+              </div>
             ) : (
               <div key={m.id} className="msg assistant">
                 <div className="who">── assistant ─────────────────────────────</div>
-                <AssistantContent content={m.content} streaming={streaming} onLoadToIde={onLoadToIde} />
+                <AssistantContent content={m.content} toolCalls={m.tool_calls} streaming={streaming} onLoadToIde={onLoadToIde} />
                 {m.stats && showStats && (
                   <pre className="stats-out">{formatStats(m.stats)}</pre>
                 )}
