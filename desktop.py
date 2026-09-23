@@ -40,7 +40,7 @@ LOADING_HTML = """<!doctype html>
   <div>
     <div class="logo-row">
       <svg width="34" height="34" viewBox="0 0 128 128"><rect x="3" y="3" width="122" height="122" rx="20" fill="#0b0b0e" stroke="#26262c" stroke-width="5"/><rect x="32" y="32" width="64" height="64" fill="__ACCENT__"/><text x="64" y="67" text-anchor="middle" dominant-baseline="middle" font-family="monospace" font-weight="800" font-size="36" fill="#ffffff">1s</text></svg>
-      <span class="brand">Su1ra</span><span class="ver">v0.1.0</span>
+      <span class="brand">Su1ra</span><span class="ver">v0.2.0</span>
     </div>
     <div id="status">starting api server<span class="cursor"></span></div>
   </div>

@@ -474,7 +474,7 @@ export default function App() {
           <div className="brand-line">
             <Logo size={20} />
             <span className="brand">Su1ra</span>
-            <span className="brand-ver">v0.1.0</span>
+            <span className="brand-ver">v0.2.0</span>
             <span className={`status-tag${status?.ok ? ' ok' : ''}`}>
               [{status?.ok ? 'ok' : 'offline'}]
             </span>

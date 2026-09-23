@@ -1,0 +1,87 @@
+# Su1ra
+
+A local-first, terminal-styled desktop chat app for [Ollama](https://ollama.com) models.
+Everything runs on your machine — your models, your data, no cloud, no accounts.
+
+```
+React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
+   (dark console UI)        (also serves the UI)        (localhost:11434)
+                                    ↓
+                          SQLite at ~/.local/share/su1ra/
+```
+
+## Features
+
+- **Streaming chat** with markdown, LaTeX math (KaTeX), and collapsible `// thinking` blocks
+- **True tool-calling** — tool-capable models execute Python through a real subprocess and read the output; works proactively (the model decides when to run code)
+- **Built-in Python IDE** — real PTY-backed terminal: ANSI colors, progress bars, interactive `input()`, Ctrl-C; auto-opens when the model presents Python code
+- **Chat ↔ IDE bridge** — run code from chat with one click, attach IDE runs back into the conversation
+- **Command console** — the only navigation surface; tab-complete everything:
+
+  | Command | What it does |
+  |---|---|
+  | `/help` | list all commands |
+  | `/models` | list models; `/models <name|n>` to select |
+  | `/newchat` | start a new conversation |
+  | `/chats` | list chats; `/chats <n|id>` to open |
+  | `/delchat` | delete a chat |
+  | `/settings` | open the settings modal |
+  | `/stats` | toggle per-reply performance stats |
+  | `/eject` | shut down the Ollama server |
+  | `/connect` | start / reconnect Ollama |
+  | `/ide` | toggle the Python IDE pane |
+
+- 10 accent themes, persistent history in SQLite, per-chat system prompt / temperature / context length
+
+## Requirements
+
+- [Ollama](https://ollama.com/download) installed (the app detects or starts it for you)
+- At least one tool-capable model, e.g.:
+  ```
+  ollama pull qwen2.5-coder:7b
+  ```
+
+## Install
+
+### Windows
+
+Download `Su1ra-setup-x64.exe` from releases and run it. Ollama must be installed separately.
+
+### Linux
+
+Download `Su1ra-linux-x64.tar.gz`, then:
+
+```bash
+tar -xzf Su1ra-linux-x64.tar.gz
+./Su1ra/su1ra
+```
+
+Requires GTK + WebKitGTK (present on most desktop distros).
+
+### From source
+
+```bash
+python -m venv .venv
+.venv/bin/pip install -r backend/requirements.txt
+cd frontend && yarn && yarn build && cd ..
+.venv/bin/python desktop.py
+```
+
+## Building the packages
+
+Linux (built and tested here):
+
+```bash
+.venv/bin/pip install pyinstaller
+./packaging/build-linux.sh
+```
+
+Windows (run on a Windows machine in the activated venv, with [Inno Setup 6](https://jrsoftware.org/isinfo.php) installed):
+
+```bat
+packaging\build-windows.bat
+```
+
+## Data
+
+Everything lives in `~/.local/share/su1ra/` (SQLite history, settings, IDE scratch). Delete it for a factory reset.

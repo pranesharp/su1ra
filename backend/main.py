@@ -15,11 +15,16 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 import ollama
-import ptyrunner
 import runner
 import store
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if os.name == "posix":
+    import ptyrunner
+
+if getattr(sys, "frozen", False):
+    PROJECT_ROOT = Path(sys._MEIPASS)
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DIST = PROJECT_ROOT / "frontend" / "dist"
 
 store.init_db()

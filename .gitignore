@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 data/
 .DS_Store
+frontend/dist/
+build/
+packaging/dist/
+packaging/build/
