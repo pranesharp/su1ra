@@ -5,6 +5,7 @@ import ChatView from './components/ChatView.jsx'
 import Composer from './components/Composer.jsx'
 import Logo from './components/Logo.jsx'
 import SettingsModal from './components/SettingsModal.jsx'
+import IdePane from './components/IdePane.jsx'
 
 const COMMANDS = [
   { cmd: '/help', desc: 'show available commands' },
@@ -16,7 +17,14 @@ const COMMANDS = [
   { cmd: '/eject', desc: 'shut down the ollama server instantly' },
   { cmd: '/connect', desc: 'start / reconnect the ollama server' },
   { cmd: '/stats', desc: 'toggle per-reply performance stats' },
+  { cmd: '/ide', desc: 'toggle the python ide pane' },
 ]
+
+const STARTER_CODE = `# scratch — runs in ~/.local/share/su1ra/scratch
+print("hello from su1ra")
+
+for i in range(3):
+    print(f"tick {i}")`
 
 export default function App() {
   const [conversations, setConversations] = useState([])
@@ -29,8 +37,15 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [accent, setAccent] = useState(DEFAULT_ACCENT)
   const [showStats, setShowStats] = useState(false)
+  const [ideOpen, setIdeOpen] = useState(false)
+  const [ideWidth, setIdeWidth] = useState(460)
+  const [ideCode, setIdeCode] = useState(STARTER_CODE)
+  const [ideOutput, setIdeOutput] = useState({ lines: [], exitCode: null })
   const abortRef = useRef(null)
   const idRef = useRef(1000)
+  const widthRef = useRef(460)
+  const moveRef = useRef(null)
+  const upRef = useRef(null)
 
   useEffect(() => {
     applyAccent(accent)
@@ -47,6 +62,8 @@ export default function App() {
       setStatus(statusRes)
       setAccent(settingsRes.accent || DEFAULT_ACCENT)
       setShowStats(settingsRes.show_stats === true)
+      setIdeOpen(settingsRes.ide_open === true)
+      setIdeWidth(typeof settingsRes.ide_width === 'number' ? settingsRes.ide_width : 460)
       setModels(modelsRes.models)
       setConversations(convsRes.conversations)
       if (convsRes.conversations.length > 0) {
@@ -59,6 +76,17 @@ export default function App() {
       }
     }
     boot()
+  }, [])
+
+  useEffect(() => {
+    widthRef.current = ideWidth
+  }, [ideWidth])
+
+  useEffect(() => {
+    return () => {
+      if (moveRef.current) window.removeEventListener('mousemove', moveRef.current)
+      if (upRef.current) window.removeEventListener('mouseup', upRef.current)
+    }
   }, [])
 
   const activeConversation = conversations.find((c) => c.id === activeId) || null
@@ -226,6 +254,15 @@ export default function App() {
       return
     }
 
+    if (cmd === '/ide') {
+      const next = !ideOpen
+      setIdeOpen(next)
+      await api.saveSettings({ ide_open: next })
+      const line = next ? '// ide pane: on' : '// ide pane: off'
+      pushSystem(`${echo}\n\n${line}`)
+      return
+    }
+
     pushSystem(`${echo}\n\n// unknown command: ${cmd} — try /help`)
   }
 
@@ -294,6 +331,59 @@ export default function App() {
     abortRef.current?.abort()
   }
 
+  async function closeIde() {
+    setIdeOpen(false)
+    await api.saveSettings({ ide_open: false })
+  }
+
+  function loadToIde(code) {
+    setIdeCode(code)
+    if (!ideOpen) {
+      setIdeOpen(true)
+      api.saveSettings({ ide_open: true })
+    }
+    pushSystem(`// loaded ${code.split('\n').length} lines into the ide`)
+  }
+
+  function sendIdeToChat() {
+    const { lines, exitCode } = ideOutput
+    const out = lines.map((l) => l.text).join('\n')
+    const status = exitCode === null ? 'not run' : exitCode === -1 ? 'killed' : `exit ${exitCode}`
+    const parts = [
+      'Here is the code currently in my IDE editor:',
+      '',
+      '```python',
+      ideCode,
+      '```',
+    ]
+    if (out.trim()) {
+      parts.push('', `Output from the last run (${status}):`, '', '```', out, '```')
+    } else {
+      parts.push('', `I have not run it yet (${status}).`)
+    }
+    send(parts.join('\n'))
+  }
+
+  function startResize(e) {
+    e.preventDefault()
+    const onMove = (ev) => {
+      const next = Math.min(1200, Math.max(280, window.innerWidth - ev.clientX))
+      widthRef.current = next
+      setIdeWidth(next)
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      moveRef.current = null
+      upRef.current = null
+      api.saveSettings({ ide_width: widthRef.current })
+    }
+    moveRef.current = onMove
+    upRef.current = onUp
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+
   async function saveSettings({ ollamaUrl, systemPrompt, temperature, contextLength, accent: newAccent }) {
     await api.saveSettings({ ollama_url: ollamaUrl, accent: newAccent })
     setStatus(await api.getStatus())
@@ -331,9 +421,23 @@ export default function App() {
             <span className="meta-model"> · model: {currentModel || 'none'}</span>
           </div>
         </header>
-        <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} />
+        <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} onLoadToIde={loadToIde} />
         <Composer commands={COMMANDS} disabled={!currentModel} streaming={streaming} onSend={send} onStop={stop} />
       </main>
+      {ideOpen && (
+        <>
+          <div className="ide-resize" onMouseDown={startResize} />
+          <IdePane
+            width={ideWidth}
+            code={ideCode}
+            onCodeChange={setIdeCode}
+            onClose={closeIde}
+            onResizeStart={startResize}
+            onOutputChange={setIdeOutput}
+            onSendToChat={sendIdeToChat}
+          />
+        </>
+      )}
       {settingsOpen && (
         <SettingsModal
           status={status}

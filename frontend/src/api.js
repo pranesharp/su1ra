@@ -89,3 +89,73 @@ export async function streamChat(body, handlers, signal) {
   }
   handlers.onDone()
 }
+
+export async function streamRun(body, handlers, signal) {
+  const res = await fetch('/api/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+  if (!res.ok) {
+    let detail = res.statusText
+    try {
+      const errBody = await res.json()
+      if (typeof errBody.detail === 'string') detail = errBody.detail
+      else if (errBody.detail) detail = JSON.stringify(errBody.detail)
+    } catch {}
+    handlers.onError(detail)
+    return
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let newlineIndex
+    while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, newlineIndex).trim()
+      buffer = buffer.slice(newlineIndex + 1)
+      if (!line) continue
+      let obj
+      try {
+        obj = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (obj.run) {
+        handlers.onRun(obj.run)
+        continue
+      }
+      if (obj.error) {
+        handlers.onError(obj.error)
+        return
+      }
+      if (obj.stream) handlers.onLine(obj.stream, obj.line)
+      if (obj.exit !== undefined) {
+        handlers.onExit(obj.exit)
+        return
+      }
+    }
+  }
+  handlers.onExit(null)
+}
+
+export async function sendRunInput(runId, text) {
+  const res = await fetch('/api/run/input', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ run_id: runId, text }),
+  })
+  if (!res.ok) {
+    let detail = res.statusText
+    try {
+      const errBody = await res.json()
+      if (typeof errBody.detail === 'string') detail = errBody.detail
+    } catch {}
+    throw new Error(detail)
+  }
+  return res.json()
+}

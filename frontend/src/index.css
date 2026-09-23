@@ -680,3 +680,209 @@ button {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* ---------- IDE pane ---------- */
+
+.ide-resize {
+  width: 4px;
+  height: 100%;
+  cursor: col-resize;
+  background: transparent;
+  flex-shrink: 0;
+}
+
+.ide-resize:hover {
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.ide-pane {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  height: 100vh;
+  overflow: hidden;
+}
+
+.ide-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.ide-head .hash {
+  color: var(--accent);
+}
+
+.ide-title {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ide-editor {
+  flex: 1 1 55%;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--code-bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.ide-gutter {
+  flex-shrink: 0;
+  overflow: hidden;
+  padding: 10px 8px 10px 12px;
+  text-align: right;
+  color: var(--faint);
+  font-size: 12.5px;
+  line-height: 1.6;
+  user-select: none;
+  background: var(--panel);
+}
+
+.ide-code {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  outline: none;
+  resize: none;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  padding: 10px 12px;
+  white-space: pre;
+  overflow: auto;
+  caret-color: var(--accent);
+  tab-size: 2;
+}
+
+.ide-out {
+  flex: 1 1 45%;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+  background: var(--bg);
+  min-height: 0;
+}
+
+.ide-line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ide-line.err {
+  color: var(--accent-bright);
+}
+
+.ide-status {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--faint);
+  background: var(--panel);
+}
+
+.code-block {
+  margin: 0 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--code-bg);
+}
+
+.code-block pre {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  padding: 12px 14px;
+  overflow-x: auto;
+}
+
+.code-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px 5px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 11px;
+}
+
+.code-lang {
+  color: var(--faint);
+  letter-spacing: 0.5px;
+}
+
+.code-load {
+  margin-left: auto;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.12s ease;
+}
+
+.code-load:hover {
+  color: var(--accent-bright);
+}
+
+.ide-out {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+.ide-line.in {
+  color: var(--accent-bright);
+  opacity: 0.85;
+}
+
+.ide-input {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.ide-input-prompt {
+  color: var(--accent);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.ide-input-field {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 2px 0;
+  caret-color: var(--accent);
+}
+
+.ide-input-field::placeholder {
+  color: var(--faint);
+}

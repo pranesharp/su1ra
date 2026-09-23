@@ -37,7 +37,7 @@ function splitThinking(content) {
   return parts
 }
 
-function AssistantContent({ content, streaming }) {
+function AssistantContent({ content, streaming, onLoadToIde }) {
   if (!content) return streaming ? <span className="cursor" /> : null
   const parts = splitThinking(content)
   return (
@@ -47,7 +47,34 @@ function AssistantContent({ content, streaming }) {
           <ThinkBlock key={i} text={p.text} />
         ) : (
           <div key={i} className="md">
-            <Markdown remarkPlugins={[remarkGfm]}>{p.text}</Markdown>
+            <Markdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                code({ className, children, ...props }) {
+                  const text = String(children).replace(/\n$/, '')
+                  const lang = /language-(\w+)/.exec(className || '')?.[1]
+                  const isBlock = className?.includes('language-') || text.includes('\n')
+                  if (!isBlock) return <code className={className} {...props}>{children}</code>
+                  return (
+                    <div className="code-block">
+                      <div className="code-head">
+                        <span className="code-lang">{lang || 'text'}</span>
+                        {lang === 'python' && (
+                          <button className="code-load" onClick={() => onLoadToIde && onLoadToIde(text)}>
+                            [ load to ide ]
+                          </button>
+                        )}
+                      </div>
+                      <pre>
+                        <code className={className} {...props}>{children}</code>
+                      </pre>
+                    </div>
+                  )
+                },
+              }}
+            >
+              {p.text}
+            </Markdown>
           </div>
         ),
       )}
@@ -56,7 +83,7 @@ function AssistantContent({ content, streaming }) {
   )
 }
 
-export default function ChatView({ messages, status, streaming, showStats }) {
+export default function ChatView({ messages, status, streaming, showStats, onLoadToIde }) {
   const scrollRef = useRef(null)
   const stickRef = useRef(true)
 
@@ -97,7 +124,7 @@ export default function ChatView({ messages, status, streaming, showStats }) {
             ) : (
               <div key={m.id} className="msg assistant">
                 <div className="who">── assistant ─────────────────────────────</div>
-                <AssistantContent content={m.content} streaming={streaming} />
+                <AssistantContent content={m.content} streaming={streaming} onLoadToIde={onLoadToIde} />
                 {m.stats && showStats && (
                   <pre className="stats-out">{formatStats(m.stats)}</pre>
                 )}

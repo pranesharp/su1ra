@@ -3,6 +3,8 @@ import json
 import os
 import re
 import subprocess
+import sys
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -25,6 +27,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+RUN_STDIN = {}
 
 
 class ChatRequest(BaseModel):
@@ -53,6 +57,18 @@ class SettingsUpdate(BaseModel):
     ollama_url: str | None = None
     accent: str | None = None
     show_stats: bool | None = None
+    ide_open: bool | None = None
+    ide_width: int | None = None
+
+
+class RunRequest(BaseModel):
+    code: str
+    language: str = "python"
+
+
+class RunInput(BaseModel):
+    run_id: str
+    text: str
 
 
 @app.get("/api/status")
@@ -71,12 +87,20 @@ async def get_settings():
         "ollama_url": store.get_setting("ollama_url") or ollama.DEFAULT_URL,
         "accent": store.get_setting("accent") or "#bf264a",
         "show_stats": store.get_setting("show_stats") == "1",
+        "ide_open": store.get_setting("ide_open") == "1",
+        "ide_width": int(store.get_setting("ide_width") or 460),
     }
 
 
 @app.patch("/api/settings")
 async def update_settings(body: SettingsUpdate):
-    if body.ollama_url is None and body.accent is None and body.show_stats is None:
+    if (
+        body.ollama_url is None
+        and body.accent is None
+        and body.show_stats is None
+        and body.ide_open is None
+        and body.ide_width is None
+    ):
         raise HTTPException(422, "nothing to update")
     if body.ollama_url is not None:
         if not body.ollama_url.startswith(("http://", "https://")):
@@ -88,11 +112,19 @@ async def update_settings(body: SettingsUpdate):
         store.set_setting("accent", body.accent.lower())
     if body.show_stats is not None:
         store.set_setting("show_stats", "1" if body.show_stats else "0")
+    if body.ide_open is not None:
+        store.set_setting("ide_open", "1" if body.ide_open else "0")
+    if body.ide_width is not None:
+        if not 280 <= body.ide_width <= 1200:
+            raise HTTPException(422, "ide_width must be between 280 and 1200")
+        store.set_setting("ide_width", str(body.ide_width))
     return {
         "ok": True,
         "ollama_url": store.get_setting("ollama_url") or ollama.DEFAULT_URL,
         "accent": store.get_setting("accent") or "#bf264a",
         "show_stats": store.get_setting("show_stats") == "1",
+        "ide_open": store.get_setting("ide_open") == "1",
+        "ide_width": int(store.get_setting("ide_width") or 460),
     }
 
 
@@ -217,6 +249,131 @@ async def chat(body: ChatRequest):
             save_partial()
 
     return StreamingResponse(generator(), media_type="application/x-ndjson")
+
+
+@app.post("/api/run")
+async def run(body: RunRequest):
+    run_id = uuid.uuid4().hex
+    if not body.code.strip():
+        raise HTTPException(422, "Empty code")
+    if body.language != "python":
+        raise HTTPException(422, "Only python is supported")
+    scratch = store.DATA_DIR / "scratch"
+    scratch.mkdir(parents=True, exist_ok=True)
+
+    async def generator():
+        proc = None
+
+        def kill_proc():
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+        try:
+            yield json.dumps({"run": run_id}) + "\n"
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-u",
+                "-c",
+                body.code,
+                cwd=scratch,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},
+            )
+            RUN_STDIN[run_id] = proc.stdin
+            queue = asyncio.Queue()
+
+            async def read_stream(stream, name):
+                buf = b""
+                while True:
+                    chunk = await stream.read(8192)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        await queue.put((name, line.decode("utf-8", errors="replace")))
+                if buf:
+                    await queue.put((name, buf.decode("utf-8", errors="replace")))
+                await queue.put((name, None))
+
+            readers = [
+                asyncio.create_task(read_stream(proc.stdout, "stdout")),
+                asyncio.create_task(read_stream(proc.stderr, "stderr")),
+            ]
+            deadline = asyncio.get_running_loop().time() + 30
+            done = 0
+            lines = 0
+            total_bytes = 0
+            capped = False
+            try:
+                while done < 2:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        kill_proc()
+                        await proc.wait()
+                        yield json.dumps({"stream": "stderr", "line": "// timeout — killed after 30s"}) + "\n"
+                        yield json.dumps({"exit": -1}) + "\n"
+                        return
+                    try:
+                        name, line = await asyncio.wait_for(queue.get(), timeout=remaining)
+                    except asyncio.TimeoutError:
+                        kill_proc()
+                        await proc.wait()
+                        yield json.dumps({"stream": "stderr", "line": "// timeout — killed after 30s"}) + "\n"
+                        yield json.dumps({"exit": -1}) + "\n"
+                        return
+                    if line is None:
+                        done += 1
+                        continue
+                    lines += 1
+                    total_bytes += len(line.encode("utf-8"))
+                    if lines > 2000 or total_bytes > 1024 * 1024:
+                        capped = True
+                        break
+                    yield json.dumps({"stream": name, "line": line}) + "\n"
+            finally:
+                for task in readers:
+                    task.cancel()
+            if capped:
+                kill_proc()
+                await proc.wait()
+                yield json.dumps({"stream": "stderr", "line": "// output truncated — process killed"}) + "\n"
+                yield json.dumps({"exit": -1}) + "\n"
+                return
+            returncode = await proc.wait()
+            yield json.dumps({"exit": returncode}) + "\n"
+        except FileNotFoundError as e:
+            yield json.dumps({"error": str(e)}) + "\n"
+        except Exception as e:
+            yield json.dumps({"error": str(e)}) + "\n"
+        finally:
+            RUN_STDIN.pop(run_id, None)
+            try:
+                if proc is not None and proc.stdin is not None and not proc.stdin.is_closing():
+                    proc.stdin.close()
+            except Exception:
+                pass
+            kill_proc()
+
+    return StreamingResponse(generator(), media_type="application/x-ndjson")
+
+
+@app.post("/api/run/input")
+async def run_input(body: RunInput):
+    writer = RUN_STDIN.get(body.run_id)
+    if writer is None:
+        raise HTTPException(404, "No running process for that run id")
+    try:
+        writer.write((body.text + "\n").encode("utf-8"))
+        await writer.drain()
+    except Exception as exc:
+        raise HTTPException(409, f"Cannot write to stdin: {exc}")
+    return {"ok": True}
 
 
 @app.get("/{full_path:path}")
