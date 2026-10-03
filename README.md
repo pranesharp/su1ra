@@ -40,6 +40,7 @@ React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
   ```
   ollama pull qwen2.5-coder:7b
   ```
+*I personally use ornith1.5:9b*
 
 ## Install
 
