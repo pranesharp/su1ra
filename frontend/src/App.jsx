@@ -372,8 +372,8 @@ export default function App() {
       setConversations((prev) => [conversation, ...prev])
       setActiveId(convId)
     }
-    const userMsg = { id: ++idRef.current, role: 'user', content: outgoing }
-    const assistantMsg = { id: ++idRef.current, role: 'assistant', content: '' }
+    const userMsg = { id: -++idRef.current, role: 'user', content: outgoing }
+    const assistantMsg = { id: -++idRef.current, role: 'assistant', content: '' }
     setMessages((prev) => [...prev, userMsg, assistantMsg])
     setStreaming(true)
     const controller = new AbortController()
@@ -384,6 +384,14 @@ export default function App() {
       await api.streamChat(
         { conversation_id: convId, content: outgoing, model: selectedModel, tools: arm },
         {
+          onUserId: (dbId) =>
+            setMessages((prev) => prev.map((m) => (m.id === userMsg.id ? { ...m, id: dbId } : m))),
+          onDone: (obj) => {
+            if (obj?.assistant_id)
+              setMessages((prev) =>
+                prev.map((m) => (m.id === assistantMsg.id ? { ...m, id: obj.assistant_id } : m)),
+              )
+          },
           onDelta: (delta) => {
             partial += delta
             setMessages((prev) =>
@@ -454,6 +462,25 @@ export default function App() {
 
   function stop() {
     abortRef.current?.abort()
+  }
+
+  // Edit / regenerate: drop this user message and everything after it, then send again
+  async function resendFrom(msg, newContent) {
+    if (streaming) return
+    try {
+      await api.deleteMessageFrom(msg.id)
+    } catch (err) {
+      if (err.message !== 'Message not found') {
+        pushSystem(`// could not truncate history: ${err.message}`)
+        return
+      }
+      // not in the DB (e.g. a command echo) — just drop it locally and resend
+    }
+    setMessages((prev) => {
+      const idx = prev.findIndex((m) => m.id === msg.id)
+      return idx === -1 ? prev : prev.slice(0, idx)
+    })
+    await send(newContent ?? msg.content)
   }
 
   async function closeIde() {
@@ -588,7 +615,7 @@ export default function App() {
             <span className="meta-model"> · model: {currentModel || 'none'}</span>
           </div>
         </header>
-        <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} onLoadToIde={loadToIde} onRunCode={runInIde} onDownloadArtifact={downloadArtifact} onOpenArtifact={openArtifact} onOllamaReady={refreshStatus} />
+        <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} onLoadToIde={loadToIde} onRunCode={runInIde} onDownloadArtifact={downloadArtifact} onOpenArtifact={openArtifact} onOllamaReady={refreshStatus} onResendFrom={resendFrom} />
         <Composer commands={COMMANDS} disabled={!currentModel} streaming={streaming} onSend={send} onStop={stop} codeArmed={codeArmed} />
       </main>
       {ideOpen && (

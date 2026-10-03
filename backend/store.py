@@ -178,3 +178,17 @@ def add_message(conversation_id, role, content, stats=None, tool_calls=None):
             "tool_calls": json.loads(row["tool_calls"]) if row["tool_calls"] else None,
             "created_at": row["created_at"],
         }
+
+
+def delete_message_and_following(message_id):
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT conversation_id FROM messages WHERE id = ?", (message_id,)
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute(
+            "DELETE FROM messages WHERE conversation_id = ? AND id >= ?",
+            (row["conversation_id"], message_id),
+        )
+        return True

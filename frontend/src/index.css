@@ -1259,3 +1259,68 @@ button {
 .setup-phase {
   color: var(--muted);
 }
+
+/* user message hover actions + inline edit */
+.msg.user {
+  position: relative;
+}
+
+.msg.user .user-text {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+.user-actions {
+  position: absolute;
+  top: -13px;
+  right: 0;
+  display: flex;
+  gap: 8px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  background: var(--bg, #0a0a0c);
+}
+
+.msg.user:hover .user-actions {
+  opacity: 1;
+}
+
+.user-actions button,
+.user-edit-actions button {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.user-actions button:hover,
+.user-edit-actions button:hover {
+  color: var(--accent);
+}
+
+.user-edit {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.user-edit-input {
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 8px;
+  resize: vertical;
+  outline: none;
+}
+
+.user-edit-actions {
+  display: flex;
+  gap: 10px;
+}

@@ -436,7 +436,7 @@ async def chat(body: ChatRequest):
     if not model:
         raise HTTPException(422, "No model selected")
 
-    store.add_message(body.conversation_id, "user", content)
+    user_row = store.add_message(body.conversation_id, "user", content)
     if not conversation["title"]:
         store.update_conversation(body.conversation_id, title=content[:60])
     history = build_history(store.get_messages(body.conversation_id))
@@ -450,6 +450,7 @@ async def chat(body: ChatRequest):
         sys_prompt = f"{sys_prompt}\n\n{directive}" if sys_prompt.strip() else directive
 
     async def generator():
+        yield json.dumps({"user_id": user_row["id"]}) + "\n"
         working = list(history)
 
         for round_idx in range(MAX_TOOL_ROUNDS + 1):
@@ -458,19 +459,20 @@ async def chat(body: ChatRequest):
             stats = None
             pending_calls = []
             saved = False
+            saved_id = None
             consumed = False
 
             def save():
-                nonlocal saved
+                nonlocal saved, saved_id
                 if saved or (not text.strip() and not pending_calls):
                     return
-                store.add_message(
+                saved_id = store.add_message(
                     body.conversation_id,
                     "assistant",
                     "" if consumed else text.strip(),
                     stats,
                     tool_calls=[finalize_tool_call(tc) for tc in pending_calls] if pending_calls else None,
-                )
+                )["id"]
                 saved = True
 
             try:
@@ -506,7 +508,7 @@ async def chat(body: ChatRequest):
 
             if not pending_calls:
                 eval_count = stats["eval_count"] if stats else 0
-                yield json.dumps({"done": True, "eval_count": eval_count}) + "\n"
+                yield json.dumps({"done": True, "eval_count": eval_count, "assistant_id": saved_id}) + "\n"
                 return
 
             finalized = [finalize_tool_call(tc) for tc in pending_calls]
@@ -544,6 +546,14 @@ async def chat(body: ChatRequest):
                 ) + "\n"
 
     return StreamingResponse(generator(), media_type="application/x-ndjson")
+
+
+@app.delete("/api/messages/{message_id}/following")
+async def delete_message_following(message_id: int):
+    """Delete a message and everything after it (edit/regenerate truncation)."""
+    if not store.delete_message_and_following(message_id):
+        raise HTTPException(404, "Message not found")
+    return {"ok": True}
 
 
 @app.post("/api/run")

@@ -86,21 +86,25 @@ function lastHtmlBlock(text) {
   return blocks.length ? blocks[blocks.length - 1][1].replace(/\n$/, '') : null
 }
 
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    ta.remove()
+  }
+}
+
 function Linkified({ text }) {
   const [copied, setCopied] = useState(false)
   const parts = text.split(/(https?:\/\/[^\s)]+)/g)
 
   async function copyAll() {
-    try {
-      await navigator.clipboard.writeText(text)
-    } catch {
-      const ta = document.createElement('textarea')
-      ta.value = text
-      document.body.appendChild(ta)
-      ta.select()
-      document.execCommand('copy')
-      ta.remove()
-    }
+    await copyText(text)
     setCopied(true)
     setTimeout(() => setCopied(false), 1200)
   }
@@ -121,6 +125,58 @@ function Linkified({ text }) {
       <button className="sys-copy" onClick={copyAll}>
         {copied ? '[ copied ]' : '[ copy ]'}
       </button>
+    </div>
+  )
+}
+
+function UserMsg({ m, streaming, onResendFrom }) {
+  const [copied, setCopied] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+
+  if (editing) {
+    return (
+      <div className="msg user">
+        <span className="prompt-char">❯</span>
+        <div className="user-edit">
+          <textarea
+            className="user-edit-input"
+            value={draft}
+            rows={Math.min(8, draft.split('\n').length + 1)}
+            autoFocus
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                setEditing(false)
+                onResendFrom?.(m, draft)
+              } else if (e.key === 'Escape') {
+                setEditing(false)
+              }
+            }}
+          />
+          <div className="user-edit-actions">
+            <button onClick={() => { setEditing(false); onResendFrom?.(m, draft) }}>[ save + resend ]</button>
+            <button onClick={() => setEditing(false)}>[ cancel ]</button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="msg user">
+      <span className="prompt-char">❯</span>
+      <div className="user-text">{m.content}</div>
+      {!streaming && (
+        <span className="user-actions">
+          <button onClick={async () => { await copyText(m.content); setCopied(true); setTimeout(() => setCopied(false), 1200) }}>
+            {copied ? '[ copied ]' : '[ copy ]'}
+          </button>
+          <button onClick={() => { setDraft(m.content); setEditing(true) }}>[ edit ]</button>
+          <button onClick={() => onResendFrom?.(m)}>[ redo ]</button>
+        </span>
+      )}
     </div>
   )
 }
@@ -202,7 +258,7 @@ function AssistantContent({ content, toolCalls, streaming, onLoadToIde, onRunCod
   )
 }
 
-export default function ChatView({ messages, status, streaming, showStats, onLoadToIde, onRunCode, onDownloadArtifact, onOpenArtifact, onOllamaReady }) {
+export default function ChatView({ messages, status, streaming, showStats, onLoadToIde, onRunCode, onDownloadArtifact, onOpenArtifact, onOllamaReady, onResendFrom }) {
   const scrollRef = useRef(null)
   const stickRef = useRef(true)
 
@@ -236,10 +292,7 @@ export default function ChatView({ messages, status, streaming, showStats, onLoa
         ) : (
           messages.map((m) =>
             m.role === 'user' ? (
-              <div key={m.id} className="msg user">
-                <span className="prompt-char">❯</span>
-                <div className="user-text">{m.content}</div>
-              </div>
+              <UserMsg key={m.id} m={m} streaming={streaming} onResendFrom={onResendFrom} />
             ) : m.role === 'system' ? (
               <div key={m.id} className="msg system">
                 <Linkified text={m.content} />

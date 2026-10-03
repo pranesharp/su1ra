@@ -24,6 +24,8 @@ export const getModels = () => getJSON('/api/models')
 
 export const cancelPull = (model) => sendJSON('/api/models/pull/cancel', 'POST', { model })
 
+export const deleteMessageFrom = (id) => sendJSON(`/api/messages/${id}/following`, 'DELETE')
+
 export async function pullModel(model, onEvent, signal) {
   const resp = await fetch('/api/models/pull', {
     method: 'POST',
@@ -111,11 +113,12 @@ export async function streamChat(body, handlers, signal) {
         return
       }
       if (obj.delta) handlers.onDelta(obj.delta)
+      if (obj.user_id) handlers.onUserId?.(obj.user_id)
       if (obj.tool_start) handlers.onToolStart?.(obj.tool_start)
       if (obj.tool) handlers.onTool?.(obj.tool)
       if (obj.stats) handlers.onStats?.(obj.stats)
       if (obj.done) {
-        handlers.onDone?.()
+        handlers.onDone?.(obj)
         return
       }
     }
