@@ -1012,3 +1012,11 @@ button {
 .ide-input-field::placeholder {
   color: var(--faint);
 }
+
+.sandbox-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  opacity: 0.85;
+}

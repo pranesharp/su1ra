@@ -148,6 +148,8 @@ def tool_result_text(result):
         status = f"exit {result['exit']} — output truncated, process killed"
     else:
         status = f"exit {result['exit']}"
+    if result.get("sandbox") == "unavailable":
+        status += " — sandbox: unavailable, ran unsandboxed (install bubblewrap)"
     if not out.strip():
         return f"[no output — {status}]"
     return f"{out}\n[{status}]"
@@ -182,6 +184,7 @@ class SettingsUpdate(BaseModel):
     show_stats: bool | None = None
     ide_open: bool | None = None
     ide_width: int | None = None
+    sandbox_tools: bool | None = None
 
 
 class RunRequest(BaseModel):
@@ -212,6 +215,7 @@ async def get_settings():
         "show_stats": store.get_setting("show_stats") == "1",
         "ide_open": store.get_setting("ide_open") == "1",
         "ide_width": int(store.get_setting("ide_width") or 460),
+        "sandbox_tools": store.get_setting("sandbox_tools") != "0",
     }
 
 
@@ -223,6 +227,7 @@ async def update_settings(body: SettingsUpdate):
         and body.show_stats is None
         and body.ide_open is None
         and body.ide_width is None
+        and body.sandbox_tools is None
     ):
         raise HTTPException(422, "nothing to update")
     if body.ollama_url is not None:
@@ -237,6 +242,8 @@ async def update_settings(body: SettingsUpdate):
         store.set_setting("show_stats", "1" if body.show_stats else "0")
     if body.ide_open is not None:
         store.set_setting("ide_open", "1" if body.ide_open else "0")
+    if body.sandbox_tools is not None:
+        store.set_setting("sandbox_tools", "1" if body.sandbox_tools else "0")
     if body.ide_width is not None:
         if not 280 <= body.ide_width <= 1200:
             raise HTTPException(422, "ide_width must be between 280 and 1200")
@@ -248,6 +255,7 @@ async def update_settings(body: SettingsUpdate):
         "show_stats": store.get_setting("show_stats") == "1",
         "ide_open": store.get_setting("ide_open") == "1",
         "ide_width": int(store.get_setting("ide_width") or 460),
+        "sandbox_tools": store.get_setting("sandbox_tools") != "0",
     }
 
 
@@ -414,7 +422,9 @@ async def chat(body: ChatRequest):
                     result_text = f"Unknown tool: {name}. The only available tool is run_python."
                 else:
                     try:
-                        result = await runner.run_python(code)
+                        result = await runner.run_python(
+                            code, sandboxed=store.get_setting("sandbox_tools") != "0"
+                        )
                         result_text = tool_result_text(result)
                     except Exception as exc:
                         result = None

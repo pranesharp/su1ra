@@ -46,6 +46,7 @@ export default function App() {
   const [artifact, setArtifact] = useState(null)
   const [artifactTab, setArtifactTab] = useState('preview')
   const [codeArmed, setCodeArmed] = useState(false)
+  const [sandboxTools, setSandboxTools] = useState(true)
   const abortRef = useRef(null)
   const pendingToolRef = useRef(null)
   const ideRunSeenRef = useRef(null)
@@ -72,6 +73,7 @@ export default function App() {
       setShowStats(settingsRes.show_stats === true)
       setIdeOpen(settingsRes.ide_open === true)
       setIdeWidth(typeof settingsRes.ide_width === 'number' ? settingsRes.ide_width : 460)
+      setSandboxTools(settingsRes.sandbox_tools !== false)
       setModels(modelsRes.models)
       setConversations(convsRes.conversations)
       if (convsRes.conversations.length > 0) {
@@ -503,8 +505,8 @@ export default function App() {
     window.addEventListener('mouseup', onUp)
   }
 
-  async function saveSettings({ ollamaUrl, systemPrompt, temperature, contextLength, accent: newAccent }) {
-    await api.saveSettings({ ollama_url: ollamaUrl, accent: newAccent })
+  async function saveSettings({ ollamaUrl, systemPrompt, temperature, contextLength, accent: newAccent, sandboxTools: sandboxPref }) {
+    await api.saveSettings({ ollama_url: ollamaUrl, accent: newAccent, ...(sandboxPref === undefined ? {} : { sandbox_tools: sandboxPref }) })
     setStatus(await api.getStatus())
     setAccent(newAccent)
     if (activeConversation) {
@@ -570,13 +572,14 @@ export default function App() {
         </>
       )}
       {settingsOpen && (
-        <SettingsModal
-          status={status}
-          conversation={activeConversation}
-          accent={accent}
-          onSave={saveSettings}
-          onClose={() => setSettingsOpen(false)}
-        />
+          <SettingsModal
+            status={status}
+            conversation={activeConversation}
+            accent={accent}
+            sandboxTools={sandboxTools}
+            onSave={saveSettings}
+            onClose={() => setSettingsOpen(false)}
+          />
       )}
     </div>
   )

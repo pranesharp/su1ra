@@ -1,7 +1,9 @@
 import asyncio
 import os
 import sys
+from pathlib import Path
 
+import sandbox
 from store import DATA_DIR
 
 TIMEOUT_SECONDS = 30
@@ -9,14 +11,28 @@ MAX_LINES = 2000
 MAX_BYTES = 1024 * 1024
 
 
-async def run_python(code):
+def interpreter_root():
+    exe = Path(os.path.abspath(sys.executable))
+    venv_root = exe.parents[1]
+    if (venv_root / "pyvenv.cfg").exists():
+        return venv_root
+    return exe.parent
+
+
+async def run_python(code, sandboxed=True):
     scratch = DATA_DIR / "scratch"
     scratch.mkdir(parents=True, exist_ok=True)
+    cmd = [os.path.abspath(sys.executable), "-u", "-c", code]
+    mode = "off"
+    if sandboxed:
+        wrapped = sandbox.wrap(cmd, scratch, ro_dirs=[interpreter_root()])
+        if wrapped:
+            cmd = wrapped
+            mode = "on"
+        else:
+            mode = "unavailable"
     proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-u",
-        "-c",
-        code,
+        *cmd,
         cwd=scratch,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -77,4 +93,5 @@ async def run_python(code):
         "output": "\n".join(lines),
         "timed_out": timed_out,
         "capped": state["capped"],
+        "sandbox": mode,
     }

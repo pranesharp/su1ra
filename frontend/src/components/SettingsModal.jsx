@@ -16,12 +16,13 @@ function nearestIndex(value) {
   return best
 }
 
-export default function SettingsModal({ status, conversation, accent, onSave, onClose }) {
+export default function SettingsModal({ status, conversation, accent, sandboxTools, onSave, onClose }) {
   const [ollamaUrl, setOllamaUrl] = useState(status?.url || 'http://localhost:11434')
   const [systemPrompt, setSystemPrompt] = useState(conversation?.system_prompt || '')
   const [temperature, setTemperature] = useState(conversation?.temperature ?? 0.7)
   const [ctxIndex, setCtxIndex] = useState(nearestIndex(conversation?.context_length || 0))
   const [selectedAccent, setSelectedAccent] = useState(accent || DEFAULT_ACCENT)
+  const [sandboxOn, setSandboxOn] = useState(sandboxTools !== false)
 
   useEffect(() => {
     function onKey(e) {
@@ -100,6 +101,14 @@ export default function SettingsModal({ status, conversation, accent, onSave, on
             <span>128k</span>
           </div>
         </label>
+        <label className="sandbox-row">
+          <input
+            type="checkbox"
+            checked={sandboxOn}
+            onChange={(e) => setSandboxOn(e.target.checked)}
+          />
+          <span>Sandbox model-run code (no network, isolated filesystem — Linux only)</span>
+        </label>
         <div className="modal-actions">
           <button className="btn-ghost" onClick={onClose}>Cancel</button>
           <button
@@ -111,6 +120,7 @@ export default function SettingsModal({ status, conversation, accent, onSave, on
                 temperature,
                 contextLength: CTX_STEPS[ctxIndex],
                 accent: selectedAccent,
+                sandboxTools: sandboxOn,
               })
             }
           >
