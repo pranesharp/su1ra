@@ -49,11 +49,14 @@ Download `Su1ra-setup-x64.exe` from releases and run it. The installer offers to
 
 ### Linux
 
-Download `Su1ra-linux-x64.tar.gz`, then:
+Git pull (Linux users, you know the drill):
 
 ```bash
-tar -xzf Su1ra-linux-x64.tar.gz
-./Su1ra/su1ra
+git clone <repo-url> && cd su1ra
+python -m venv .venv
+.venv/bin/pip install -r backend/requirements.txt
+cd frontend && yarn && yarn build && cd ..
+.venv/bin/python desktop.py
 ```
 
 Requires GTK + WebKitGTK (present on most desktop distros).
@@ -69,12 +72,7 @@ cd frontend && yarn && yarn build && cd ..
 
 ## Building the packages
 
-Linux (built and tested here):
-
-```bash
-.venv/bin/pip install pyinstaller
-./packaging/build-linux.sh
-```
+Linux users run from source (above), so the only packaged artifact is the Windows installer.
 
 Windows (run on a Windows machine in the activated venv, with [Inno Setup 6](https://jrsoftware.org/isinfo.php) installed):
 

@@ -8,3 +8,5 @@ frontend/dist/
 build/
 packaging/dist/
 packaging/build/
+packaging/Su1ra-linux-x64.tar.gz
+packaging/dist/
