@@ -14,7 +14,8 @@ const COMMANDS = [
   { cmd: '/models', desc: 'list models — /models <name|n> to select, /models pull <name> to download, /models get [query] to browse' },
   { cmd: '/newchat', desc: 'start a new conversation' },
   { cmd: '/chats', desc: 'list chats — /chats <n|id> to open' },
-  { cmd: '/delchat', desc: 'delete a chat — /delchat <n|id>' },
+  { cmd: '/delchat', desc: 'delete a chat — /delchat <n|id>, or /delchat all to wipe all history' },
+  { cmd: '/clear', desc: 'clear the current chat (messages only, keeps the chat + settings)' },
   { cmd: '/settings', desc: 'open settings' },
   { cmd: '/eject', desc: 'shut down the ollama server instantly' },
   { cmd: '/connect', desc: 'start / reconnect the ollama server' },
@@ -264,6 +265,14 @@ export default function App() {
     }
 
     if (cmd === '/delchat') {
+      if (arg.trim().toLowerCase() === 'all') {
+        const res = await api.clearAllConversations()
+        setConversations([])
+        setActiveId(null)
+        setMessages([])
+        pushSystem(`${echo}\n\n// history cleared — ${res.deleted} conversation${res.deleted === 1 ? '' : 's'} deleted`)
+        return
+      }
       const conversation = resolveConversation(arg)
       if (!conversation) {
         pushSystem(`${echo}\n\n// no conversation #${arg} — try /chats`)
@@ -271,6 +280,21 @@ export default function App() {
       }
       await deleteConversation(conversation.id)
       pushSystem(`${echo}\n\n// deleted [${conversation.id}] ${conversation.title || 'new chat'}`)
+      return
+    }
+
+    if (cmd === '/clear') {
+      if (activeId) {
+        const res = await api.clearConversation(activeId)
+        setMessages([])
+        if (activeConversation) {
+          setConversations((prev) => prev.map((c) => (c.id === activeId ? { ...c, title: '' } : c)))
+        }
+        pushSystem(`${echo}\n\n// current chat cleared — ${res.cleared} message${res.cleared === 1 ? '' : 's'} gone, model and settings kept`)
+      } else {
+        setMessages([])
+        pushSystem(`${echo}\n\n// nothing to clear — no chat open`)
+      }
       return
     }
 

@@ -66,6 +66,10 @@ export const updateConversation = (id, patch) => sendJSON(`/api/conversations/${
 
 export const deleteConversation = (id) => sendJSON(`/api/conversations/${id}`, 'DELETE')
 
+export const clearAllConversations = () => sendJSON('/api/conversations/clear-all', 'POST')
+
+export const clearConversation = (id) => sendJSON(`/api/conversations/${id}/clear`, 'POST')
+
 export const saveSettings = (data) => sendJSON('/api/settings', 'PATCH', data)
 export const downloadArtifact = (content, filename) => sendJSON('/api/download', 'POST', { content, filename })
 

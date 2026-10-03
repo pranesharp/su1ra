@@ -192,3 +192,21 @@ def delete_message_and_following(message_id):
             (row["conversation_id"], message_id),
         )
         return True
+
+
+def clear_conversation_messages(conversation_id):
+    """Drop every message in a conversation, keeping the conversation itself."""
+    with _connect() as conn:
+        n = conn.execute(
+            "DELETE FROM messages WHERE conversation_id = ?", (conversation_id,)
+        ).rowcount
+        conn.execute(
+            "UPDATE conversations SET title = ? WHERE id = ?", ("", conversation_id)
+        )
+        return n
+
+
+def delete_all_conversations():
+    with _connect() as conn:
+        n = conn.execute("DELETE FROM conversations").rowcount
+        return n

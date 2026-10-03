@@ -424,6 +424,20 @@ async def delete_conversation(conversation_id: int):
     return {"ok": True}
 
 
+@app.post("/api/conversations/clear-all")
+async def clear_all_conversations():
+    count = store.delete_all_conversations()
+    return {"ok": True, "deleted": count}
+
+
+@app.post("/api/conversations/{conversation_id}/clear")
+async def clear_conversation(conversation_id: int):
+    if not store.get_conversation(conversation_id):
+        raise HTTPException(404, "Conversation not found")
+    count = store.clear_conversation_messages(conversation_id)
+    return {"ok": True, "cleared": count}
+
+
 @app.post("/api/chat")
 async def chat(body: ChatRequest):
     conversation = store.get_conversation(body.conversation_id)
