@@ -10,12 +10,14 @@ This file carries project context across machines/sessions. Keep it current.
 
 - `backend/main.py` — all routes; chat streaming (NDJSON), tool loop, `/api/run` (IDE), settings
 - `backend/ollama.py` — Ollama client; model caps via `/api/show` (tools/thinking detection)
+- `backend/ollama_setup.py` — first-run engine installer (download/extract/spawn Ollama)
+- `backend/puller.py` — model-pull proxy (NDJSON progress, cancel, disk-space guard)
 - `backend/runner.py` — tool-run executor (subprocess, 30s timeout, 2000-line/1MB caps)
 - `backend/sandbox.py` — bubblewrap wrapper for tool runs (Linux only)
 - `backend/ptyrunner.py` — real PTY for the IDE output terminal
 - `backend/store.py` — SQLite store; `DATA_DIR` handles frozen (PyInstaller) mode
-- `frontend/src/App.jsx` — command console (`/help`, `/models`, `/code`, `/ide`, …), state
-- `frontend/src/components/` — ChatView (markdown+math), IdePane (xterm.js), ArtifactPane (iframe), SettingsModal
+- `frontend/src/App.jsx` — command console (`/help`, `/models`, `/code`, `/ide`, ...), state
+- `frontend/src/components/` — ChatView (markdown+math), IdePane (xterm.js), ArtifactPane (iframe), ModelHub (catalog), OllamaSetup (first-run callout), SettingsModal
 - `frontend/dist/` is NOT committed — run `yarn build` before `desktop.py` after a fresh clone
 
 ## Design decisions (do not undo without good reason)
@@ -40,6 +42,18 @@ This file carries project context across machines/sessions. Keep it current.
   killed/oom in Ollama's body); model-hub pulls check server-side free disk (of the
   Ollama models dir — ~/.ollama/models default) against 1.1x model size on the first
   progress event and cancel upstream if short. /api/disk powers the hub header readout.
+- Context length: slider AND free-entry textbox (SettingsModal); slider max auto-extends
+  to the selected model's native window via `GET /api/model/ctx`; exceeding the native
+  window shows a non-blocking warn. Entry is clamped to sane bounds (512..1,000,000).
+- First-run Ollama setup: when the server is unreachable, ChatView's home screen shows
+  an OllamaSetup callout with two variants — binary present → `[ start ollama ]`
+  (`POST /api/ollama/start` = ensure_running); binary absent → `[ install ollama ]`
+  (`POST /api/ollama/install`, NDJSON: pct → extracting → starting server → ok/error).
+  Installs to `<app>/ollama/` from ollama's GitHub latest release (win: .zip,
+  linux: .tar.zst — extraction detects format by magic bytes, NOT extension; the
+  temp download file has neither). `find_binary` (backend + desktop.py) checks the
+  app-dir ollama/ and ollama/bin BEFORE PATH, so the bundled engine wins. `ollama/`
+  is gitignored. Install lock prevents double-runs; disk guard before download.
 
 ## Model notes
 
@@ -56,7 +70,10 @@ This file carries project context across machines/sessions. Keep it current.
    (first run WILL surface PyInstaller/hidden-import issues; debug iteratively)
 4. Check WebView2 presence; add the runtime install line to `su1ra.iss` if missing
 5. Verify installer on a clean-ish machine; e2e: chat, tool run (expect loud
-   "sandbox unavailable" label — bwrap is Linux-only), IDE PTY fallback, model download
+   "sandbox unavailable" label — bwrap is Linux-only), IDE PTY fallback, model download,
+   first-run Ollama setup callout (delete PATH ollama to test the install variant —
+   note the win server bundle is ~1.4 GB; consider whether the installer's own
+   Ollama download task is still wanted given in-app setup exists)
 
 ## Later (roughly prioritized)
 
@@ -67,23 +84,19 @@ This file carries project context across machines/sessions. Keep it current.
 - Engine-agnostic backend (OpenAI-compatible adapter; custom server URL)
 - Chat export, RAG via Ollama embeddings, image input, streaming tool rounds
 
-## Model downloads (commit pending)
+## Model downloads & hub
 
 - `POST /api/models/pull` streams Ollama's pull progress as NDJSON; client disconnect or
   `POST /api/models/pull/cancel` aborts the pull server-side (`backend/puller.py`).
-- Two UIs: console `/models pull <name>` (live-updating system line, bare `/models pull`
-  cancels a running pull) and a Settings-modal section (chips + progress bar + cancel).
-- No in-app catalog browsing (undocumented API) — typed names + curated chips; `/models get`
-  opens the ollama.com library for discovery.
-
-## Model hub (separate window)
-
-- Settings modal has a `[ pull models ]` button that closes settings and opens the
-  ModelHub modal (frontend/src/components/ModelHub.jsx): pull box on top, starter
-  catalog below with per-row pull/progress and `[ installed ]` state from /api/models.
+- Console: `/models pull <name>` (live-updating system line, bare `/models pull` cancels).
+- Model hub: settings modal `[ pull models ]` button opens the dedicated ModelHub modal
+  (frontend/src/components/ModelHub.jsx) — pull box on top, catalog below with per-row
+  pull/progress and `[ installed ]` state from /api/models. The pull section is NOT in
+  the settings modal anymore.
 - Catalog in ModelHub.jsx is researched against ollama.com/library (Oct 2026): families
   with expandable variant dropdowns (qwen3.5, gemma4, gpt-oss, qwen3-coder, qwen3.8,
   deepseek-r1, qwen2.5-coder, community maternion/mimo-v2.6, legacy deepseek-coder)
   plus singles (ornith-1.5:9b, llama3.2:3b, phi4-mini:3.8b, mistral:7b). Sizes verified
-  from tags pages; refresh as the library moves. Inline pull progress bar lives in the
-  row being pulled.
+  from tags pages; refresh as the library moves.
+- No in-app catalog browsing/search of ollama.com (undocumented API) — the typed name box
+  accepts anything; `/models get` opens the library website for discovery.
