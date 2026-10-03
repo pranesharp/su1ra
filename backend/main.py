@@ -213,6 +213,11 @@ async def model_ctx(model: str):
     return {"context_length": await ollama.model_context_length(model)}
 
 
+@app.get("/api/disk")
+async def disk():
+    return {"free": await ollama.disk_free()}
+
+
 class PullRequest(BaseModel):
     model: str
 

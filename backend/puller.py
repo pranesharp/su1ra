@@ -3,7 +3,7 @@ import json
 
 import httpx
 
-from ollama import base_url
+from ollama import base_url, disk_free
 
 _pulls = {}
 
@@ -43,6 +43,7 @@ async def pull(model, send):
                         err = body
                     await send({"error": err or f"ollama returned {resp.status_code}"})
                     return
+                size_checked = False
                 async for line in resp.aiter_lines():
                     if not line:
                         continue
@@ -53,6 +54,14 @@ async def pull(model, send):
                     if evt.get("error"):
                         await send({"error": evt["error"]})
                         return
+                    total = evt.get("total") or 0
+                    if total and not size_checked:
+                        size_checked = True
+                        free = await disk_free()
+                        if free and free < total * 1.1:
+                            await client.request("DELETE", f"{base_url()}/api/pull", json={"model": model})
+                            await send({"error": f"not enough disk space: model needs {total // 1048576} MB, only {free // 1048576} MB free"})
+                            return
                     out = {"status": evt.get("status", "pulling")}
                     if evt.get("total") and evt.get("completed") is not None:
                         out.update(

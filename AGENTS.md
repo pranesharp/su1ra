@@ -36,6 +36,10 @@ This file carries project context across machines/sessions. Keep it current.
 - Math rendering via remark-math/katex; thinking blocks stay raw text on purpose.
 - Artifacts: single-file HTML only → sandboxed iframe preview (allow-scripts), no
   version slider, no multi-file projects in v1.
+- Failure UX: OOM chat errors map to a friendly "model too large" message (match on
+  killed/oom in Ollama's body); model-hub pulls check server-side free disk (of the
+  Ollama models dir — ~/.ollama/models default) against 1.1x model size on the first
+  progress event and cancel upstream if short. /api/disk powers the hub header readout.
 
 ## Model notes
 

@@ -1199,3 +1199,9 @@ button {
   margin: 6px 0 0;
   opacity: 0.9;
 }
+
+.hub-disk {
+  color: var(--muted);
+  font-size: 11px;
+  margin: -6px 0 10px;
+}

@@ -72,6 +72,7 @@ export default function ModelHub({ models, onModelsChanged, onClose }) {
   const [pullName, setPullName] = useState('')
   const [pull, setPull] = useState(null)
   const [openFams, setOpenFams] = useState(() => new Set())
+  const [disk, setDisk] = useState(0)
   const pullCtrl = useRef(null)
 
   useEffect(() => {
@@ -79,6 +80,10 @@ export default function ModelHub({ models, onModelsChanged, onClose }) {
       if (e.key === 'Escape') onClose()
     }
     window.addEventListener('keydown', onKey)
+    fetch('/api/disk')
+      .then((r) => r.json())
+      .then((d) => setDisk(d.free || 0))
+      .catch(() => {})
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
@@ -164,6 +169,7 @@ export default function ModelHub({ models, onModelsChanged, onClose }) {
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
         <h2>model hub</h2>
+        {disk > 0 && <p className="hub-disk">// {(disk / 1073741824).toFixed(1)} GB free where models are stored</p>}
         <div className="pull-section">
           <div className="pull-row">
             <input

@@ -38,6 +38,27 @@ async def model_supports_tools(model):
     return supported
 
 
+def models_dir():
+    candidates = []
+    if os.environ.get("OLLAMA_MODELS"):
+        candidates.append(Path(os.environ["OLLAMA_MODELS"]))
+    candidates.append(Path.home() / ".ollama" / "models")
+    candidates.append(Path.home() / ".local" / "share" / "ollama" / "models")
+    if os.environ.get("LOCALAPPDATA"):
+        candidates.append(Path(os.environ["LOCALAPPDATA"]) / "Ollama" / "models")
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return Path.home() / ".local" / "share" / "ollama" / "models"
+
+
+async def disk_free():
+    try:
+        return shutil.disk_usage(str(models_dir())).free
+    except Exception:
+        return 0
+
+
 async def model_context_length(model):
     if model in _ctx_cache:
         return _ctx_cache[model]
@@ -141,7 +162,11 @@ async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ct
             async with client.stream("POST", f"{base}/api/chat", json=payload) as resp:
                 if resp.status_code != 200:
                     body = (await resp.aread()).decode(errors="replace")[:300]
-                    yield {"error": f"Ollama returned {resp.status_code}: {body}"}
+                    low = body.lower()
+                    if "killed" in low or "out of memory" in low or "oom" in low:
+                        yield {"error": "model too large for this machine's memory — try a smaller variant, a lower quant, or reduce context length"}
+                    else:
+                        yield {"error": f"Ollama returned {resp.status_code}: {body}"}
                     return
                 saw_thinking = False
                 async for line in resp.aiter_lines():
@@ -153,7 +178,11 @@ async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ct
                     except json.JSONDecodeError:
                         continue
                     if "error" in obj:
-                        yield {"error": obj["error"]}
+                        low = obj["error"].lower()
+                        if "killed" in low or "out of memory" in low or "oom" in low:
+                            yield {"error": "model too large for this machine's memory — try a smaller variant, a lower quant, or reduce context length"}
+                        else:
+                            yield {"error": obj["error"]}
                         return
                     msg = obj.get("message") or {}
                     tool_calls = msg.get("tool_calls") or []
