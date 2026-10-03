@@ -77,5 +77,9 @@ This file carries project context across machines/sessions. Keep it current.
 - Settings modal has a `[ pull models ]` button that closes settings and opens the
   ModelHub modal (frontend/src/components/ModelHub.jsx): pull box on top, starter
   catalog below with per-row pull/progress and `[ installed ]` state from /api/models.
-- CATALOG in ModelHub.jsx is hardcoded — user wants a researched, spec-rich catalog
-  list in a follow-up pass. Inline pull progress bar lives in the row being pulled.
+- Catalog in ModelHub.jsx is researched against ollama.com/library (Oct 2026): families
+  with expandable variant dropdowns (qwen3.5, gemma4, gpt-oss, qwen3-coder, qwen3.8,
+  deepseek-r1, qwen2.5-coder, community maternion/mimo-v2.6, legacy deepseek-coder)
+  plus singles (ornith-1.5:9b, llama3.2:3b, phi4-mini:3.8b, mistral:7b). Sizes verified
+  from tags pages; refresh as the library moves. Inline pull progress bar lives in the
+  row being pulled.

@@ -1,20 +1,77 @@
 import { useEffect, useRef, useState } from 'react'
 import { pullModel, cancelPull } from '../api'
 
-const CATALOG = [
-  { name: 'ornith-1.5:9b', params: '9B', size: '6.6 GB', caps: ['tools', 'thinking', 'vision'] },
-  { name: 'deepseek-r1:1.5b', params: '1.8B', size: '1.1 GB', caps: ['tools', 'thinking'] },
-  { name: 'llama3.2:3b', params: '3B', size: '2.0 GB', caps: ['tools'] },
-  { name: 'qwen2.5:7b', params: '7.6B', size: '4.7 GB', caps: ['tools'] },
-  { name: 'qwen2.5-coder:7b', params: '7.6B', size: '4.7 GB', caps: ['tools', 'code'] },
-  { name: 'llama3.1:8b', params: '8B', size: '4.9 GB', caps: ['tools'] },
-  { name: 'gemma3:4b', params: '4.3B', size: '3.3 GB', caps: ['tools', 'vision'] },
-  { name: 'mistral:7b', params: '7.2B', size: '4.4 GB', caps: ['tools'] },
+const FAMILIES = [
+  {
+    fam: 'qwen3.5',
+    blurb: 'qwen flagship — vision, thinking, 200+ languages',
+    vars: [
+      ['0.8b', '1.0 GB'], ['2b', '2.7 GB'], ['4b', '3.4 GB'],
+      ['9b', '6.6 GB'], ['27b', '17 GB'], ['35b-a3b', '24 GB'],
+    ],
+  },
+  {
+    fam: 'gemma4',
+    blurb: 'google — vision + thinking; e-series built for laptops',
+    vars: [
+      ['e2b', '4.6 GB'], ['e4b', '6.6 GB'], ['12b', '8.0 GB'],
+      ['26b-a4b', '18 GB'], ['31b', '20 GB'],
+    ],
+  },
+  {
+    fam: 'gpt-oss',
+    blurb: 'openai open-weight — native tools + thinking',
+    vars: [['20b', '14 GB'], ['120b', '65 GB']],
+  },
+  {
+    fam: 'qwen3-coder',
+    blurb: 'agentic coder — 256k ctx, repo-scale tasks',
+    vars: [['30b', '19 GB'], ['480b', '290 GB']],
+  },
+  {
+    fam: 'qwen3.8',
+    blurb: 'newest qwen generation',
+    vars: [['27b', '18 GB']],
+  },
+  {
+    fam: 'deepseek-r1',
+    blurb: 'reasoning specialist — thinking blocks',
+    vars: [
+      ['1.5b', '1.1 GB'], ['7b', '4.7 GB'], ['8b', '5.2 GB'],
+      ['14b', '9.0 GB'], ['32b', '20 GB'], ['70b', '43 GB'],
+    ],
+  },
+  {
+    fam: 'qwen2.5-coder',
+    blurb: 'coder workhorse — still excellent at small sizes',
+    vars: [
+      ['1.5b', '1.0 GB'], ['3b', '1.9 GB'], ['7b', '4.7 GB'],
+      ['14b', '9.0 GB'], ['32b', '20 GB'],
+    ],
+  },
+  {
+    fam: 'maternion/mimo-v2.6',
+    blurb: 'xiaomi agentic coder — community upload',
+    vars: [['9b', '5.6 GB'], ['9b-instruct', '5.6 GB']],
+  },
+  {
+    fam: 'deepseek-coder',
+    blurb: 'legacy coder (2024) — superseded by qwen3-coder',
+    vars: [['1.3b', '0.8 GB'], ['6.7b', '3.8 GB'], ['33b', '19 GB']],
+  },
+]
+
+const SINGLES = [
+  ['ornith-1.5:9b', '9B · 6.6 GB · tools, thinking, vision', 'your current daily driver'],
+  ['llama3.2:3b', '3B · 2.0 GB · tools', 'compact meta model'],
+  ['phi4-mini:3.8b', '3.8B · 2.5 GB', 'reasoning + math leader at small size'],
+  ['mistral:7b', '7.2B · 4.4 GB', 'fast, efficient all-rounder'],
 ]
 
 export default function ModelHub({ models, onModelsChanged, onClose }) {
   const [pullName, setPullName] = useState('')
   const [pull, setPull] = useState(null)
+  const [openFams, setOpenFams] = useState(() => new Set())
   const pullCtrl = useRef(null)
 
   useEffect(() => {
@@ -60,8 +117,47 @@ export default function ModelHub({ models, onModelsChanged, onClose }) {
     setPull(null)
   }
 
+  function toggleFam(fam) {
+    setOpenFams((prev) => {
+      const next = new Set(prev)
+      if (next.has(fam)) next.delete(fam)
+      else next.add(fam)
+      return next
+    })
+  }
+
   function fmtPct(p) {
     return p === null || p === undefined ? '' : ` ${p}%`
+  }
+
+  function famInstalled(fam) {
+    return fam.vars.filter((v) => installed.has(`${fam.fam}:${v[0]}`)).length
+  }
+
+  function variantRow(fullTag, label, size) {
+    const isInstalled = installed.has(fullTag)
+    const isPulling = pullActive && pull.name === fullTag
+    return (
+      <div key={fullTag} className={`hub-row hub-var${isPulling ? ' pulling' : ''}`}>
+        <div className="hub-main">
+          <span className="hub-name">{fullTag}</span>
+          <span className="hub-specs">{size}</span>
+        </div>
+        {isPulling ? (
+          <div className="pull-bar hub-bar">
+            <div className="pull-fill" style={{ width: `${pull.pct ?? 0}%` }} />
+          </div>
+        ) : (
+          <button
+            className="btn-ghost"
+            disabled={isInstalled || (pullActive && pull.name !== fullTag)}
+            onClick={() => { setPullName(fullTag); startPull(fullTag) }}
+          >
+            {isInstalled ? '[ installed ]' : '[ pull ]'}
+          </button>
+        )}
+      </div>
+    )
   }
 
   return (
@@ -103,33 +199,52 @@ export default function ModelHub({ models, onModelsChanged, onClose }) {
           )}
         </div>
         <div className="hub-list">
-          {CATALOG.map((m) => {
-            const isInstalled = installed.has(m.name)
-            const isPulling = pullActive && pull.name === m.name
-            return (
-              <div key={m.name} className={`hub-row${isPulling ? ' pulling' : ''}`}>
-                <div className="hub-main">
-                  <span className="hub-name">{m.name}</span>
-                  <span className="hub-specs">{m.params} · {m.size} · {m.caps.join(', ')}</span>
+          {SINGLES.map(([tag, specs]) => (
+            <div key={tag} className={`hub-row${pullActive && pull.name === tag ? ' pulling' : ''}`}>
+              <div className="hub-main">
+                <span className="hub-name">{tag}</span>
+                <span className="hub-specs">{specs}</span>
+              </div>
+              {pullActive && pull.name === tag ? (
+                <div className="pull-bar hub-bar">
+                  <div className="pull-fill" style={{ width: `${pull.pct ?? 0}%` }} />
                 </div>
-                {isPulling ? (
-                  <div className="pull-bar hub-bar">
-                    <div className="pull-fill" style={{ width: `${pull.pct ?? 0}%` }} />
+              ) : (
+                <button
+                  className="btn-ghost"
+                  disabled={installed.has(tag) || pullActive}
+                  onClick={() => { setPullName(tag); startPull(tag) }}
+                >
+                  {installed.has(tag) ? '[ installed ]' : '[ pull ]'}
+                </button>
+              )}
+            </div>
+          ))}
+          {FAMILIES.map((fam) => {
+            const open = openFams.has(fam.fam)
+            const count = famInstalled(fam)
+            const isPullingFam = pullActive && pull.name.startsWith(`${fam.fam}:`)
+            return (
+              <div key={fam.fam} className="hub-fam">
+                <div
+                  className={`hub-row hub-famrow${isPullingFam ? ' pulling' : ''}`}
+                  onClick={() => toggleFam(fam.fam)}
+                >
+                  <div className="hub-main">
+                    <span className="hub-name">
+                      <span className={`chev${open ? ' open' : ''}`}>▸</span> {fam.fam}
+                      {count > 0 && <span className="hub-badge">{count} installed</span>}
+                    </span>
+                    <span className="hub-specs">{fam.blurb}</span>
                   </div>
-                ) : (
-                  <button
-                    className="btn-ghost"
-                    disabled={pullActive}
-                    onClick={() => { setPullName(m.name); startPull(m.name) }}
-                  >
-                    {isInstalled ? '[ installed ]' : '[ pull ]'}
-                  </button>
-                )}
+                  <span className="hub-count">{fam.vars.length} variants</span>
+                </div>
+                {open && fam.vars.map(([v, size]) => variantRow(`${fam.fam}:${v}`, v, size))}
               </div>
             )
           })}
         </div>
-        <p className="hub-hint">// catalog is a starter set — any model on ollama.com works by name above</p>
+        <p className="hub-hint">// catalog is curated — any model on ollama.com works by name above</p>
         <div className="modal-actions">
           <button className="btn-accent" onClick={onClose}>Done</button>
         </div>

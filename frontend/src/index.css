@@ -1138,3 +1138,42 @@ button {
   color: var(--muted);
   margin: 8px 0 0;
 }
+
+.hub-fam {
+  border-bottom: 1px solid #1c1c22;
+}
+.hub-famrow {
+  cursor: pointer;
+}
+.hub-famrow:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.chev {
+  display: inline-block;
+  transition: transform 0.15s ease;
+  color: var(--accent);
+}
+.chev.open {
+  transform: rotate(90deg);
+}
+.hub-count {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.hub-badge {
+  margin-left: 8px;
+  font-size: 10px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  padding: 0 5px;
+  border-radius: 2px;
+}
+.hub-var {
+  padding-left: 26px;
+  border-bottom: none;
+}
+.hub-var button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
