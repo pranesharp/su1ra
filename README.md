@@ -3,6 +3,9 @@
 A local, terminal style desktop gui app for [Ollama][Backend]( : https://ollama.com) models. Removing the hassle of setting up agentic and tool calls externally for Ollama.
 Everything runs on your machine, your models, your data, no cloud, no accounts.
 
+<img width="740" height="542" alt="screenshot_20261004_044925" src="https://github.com/user-attachments/assets/b5179e58-3779-4a7a-814a-d3735475c3e6" />
+
+
 ```
 React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
    (dark console UI)        (also serves the UI)        (localhost:11434)
