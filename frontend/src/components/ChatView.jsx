@@ -82,7 +82,7 @@ function ToolOutputBlock({ content }) {
 }
 
 function lastHtmlBlock(text) {
-  const blocks = [...text.matchAll(/```html\n([\s\S]*?)```/g)]
+  const blocks = [...text.matchAll(/```html\n([\s\S]*?)(```|$)/gi)]
   return blocks.length ? blocks[blocks.length - 1][1].replace(/\n$/, '') : null
 }
 
@@ -252,16 +252,21 @@ export default function ChatView({ messages, status, streaming, showStats, onLoa
               <div key={m.id} className="msg assistant">
                 <div className="who">── assistant ─────────────────────────────</div>
                 <AssistantContent content={m.content} toolCalls={m.tool_calls} streaming={streaming} onLoadToIde={onLoadToIde} onRunCode={onRunCode} />
-                {onDownloadArtifact && /```html\n/.test(m.content || '') && !streaming && (
-                  <span className="artifact-actions">
-                    <button className="code-run artifact-dl" onClick={() => onOpenArtifact(lastHtmlBlock(m.content))}>
-                      [ open artifact ]
-                    </button>
-                    <button className="code-run artifact-dl" onClick={() => onDownloadArtifact(lastHtmlBlock(m.content))}>
-                      [ download artifact ]
-                    </button>
-                  </span>
-                )}
+                {(() => {
+                  if (!onDownloadArtifact || streaming) return null
+                  const block = lastHtmlBlock(m.content || '')
+                  if (!block) return null
+                  return (
+                    <span className="artifact-actions">
+                      <button className="code-run artifact-dl" onClick={() => onOpenArtifact(block)}>
+                        [ open artifact ]
+                      </button>
+                      <button className="code-run artifact-dl" onClick={() => onDownloadArtifact(block)}>
+                        [ download artifact ]
+                      </button>
+                    </span>
+                  )
+                })()}
                 {m.stats && showStats && (
                   <pre className="stats-out">{formatStats(m.stats)}</pre>
                 )}
