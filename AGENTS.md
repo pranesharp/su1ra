@@ -37,7 +37,9 @@ This file carries project context across machines/sessions. Keep it current.
 - **Installer installs the server-only Ollama engine** — Su1ra is the GUI; no tray app.
 - Math rendering via remark-math/katex; thinking blocks stay raw text on purpose.
 - Artifacts: single-file HTML only → sandboxed iframe preview (allow-scripts), no
-  version slider, no multi-file projects in v1.
+  version slider, no multi-file projects in v1. Block extraction is tolerant (unclosed
+  fence, case-insensitive); open/download buttons render only when a block is actually
+  extractable (commit 5100c13).
 - Failure UX: OOM chat errors map to a friendly "model too large" message (match on
   killed/oom in Ollama's body); model-hub pulls check server-side free disk (of the
   Ollama models dir — ~/.ollama/models default) against 1.1x model size on the first
@@ -45,6 +47,19 @@ This file carries project context across machines/sessions. Keep it current.
 - Context length: slider AND free-entry textbox (SettingsModal); slider max auto-extends
   to the selected model's native window via `GET /api/model/ctx`; exceeding the native
   window shows a non-blocking warn. Entry is clamped to sane bounds (512..1,000,000).
+  The textbox is the single source of truth — the slider is derived from it; empty box
+  means "default" (0).
+- **Default chat settings** (commit 4584e07): `default_system_prompt` /
+  `default_temperature` / `default_context_length` are persisted settings; every new
+  conversation (send-from-home, /newchat, the new-chat button) inherits them via
+  `chatDefaultsRef`. Opening settings inside a chat edits that chat (per-chat override).
+  Do NOT create conversations with `{model}` only — that was the original bug.
+- History semantics: user messages render with copy / edit / redo; edit and redo
+  truncate via `DELETE /api/messages/{id}/following` then resend. `/clear` empties the
+  current chat (keeps chat + its settings); `/delchat all` wipes all conversations.
+- CSS gotcha: `.modal input { width: 100% }` out-specifies single-class rules — any new
+  input inside the modal needs a `.modal`-scoped override or it stretches and crushes
+  flex siblings (this broke the ctx slider once; see commit 0d65371).
 - First-run Ollama setup: when the server is unreachable, ChatView's home screen shows
   an OllamaSetup callout with two variants — binary present → `[ start ollama ]`
   (`POST /api/ollama/start` = ensure_running); binary absent → `[ install ollama ]`
