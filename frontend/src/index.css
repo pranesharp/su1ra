@@ -1205,3 +1205,27 @@ button {
   font-size: 11px;
   margin: -6px 0 10px;
 }
+
+.setup-box {
+  border: 1px solid var(--accent);
+  background: rgba(255, 255, 255, 0.03);
+  padding: 14px 16px;
+  margin: 14px auto 0;
+  max-width: 560px;
+  font-size: 13px;
+}
+.setup-box p {
+  margin: 0 0 8px;
+  color: var(--fg);
+}
+.setup-err {
+  color: var(--accent-err, #ff5f5f);
+}
+.setup-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.setup-phase {
+  color: var(--muted);
+}

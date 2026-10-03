@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from './api'
 import { applyAccent, DEFAULT_ACCENT } from './theme'
 import ChatView, { splitThinking } from './components/ChatView.jsx'
@@ -35,6 +35,9 @@ export default function App() {
   const [messages, setMessages] = useState([])
   const [models, setModels] = useState([])
   const [status, setStatus] = useState(null)
+  const refreshStatus = useCallback(async () => {
+    setStatus(await api.getStatus())
+  }, [])
   const [selectedModel, setSelectedModel] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -585,7 +588,7 @@ export default function App() {
             <span className="meta-model"> · model: {currentModel || 'none'}</span>
           </div>
         </header>
-        <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} onLoadToIde={loadToIde} onRunCode={runInIde} onDownloadArtifact={downloadArtifact} onOpenArtifact={openArtifact} />
+        <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} onLoadToIde={loadToIde} onRunCode={runInIde} onDownloadArtifact={downloadArtifact} onOpenArtifact={openArtifact} onOllamaReady={refreshStatus} />
         <Composer commands={COMMANDS} disabled={!currentModel} streaming={streaming} onSend={send} onStop={stop} codeArmed={codeArmed} />
       </main>
       {ideOpen && (

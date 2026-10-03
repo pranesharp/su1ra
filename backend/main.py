@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 import ollama
+import ollama_setup
 import puller
 import runner
 import store
@@ -216,6 +217,47 @@ async def model_ctx(model: str):
 @app.get("/api/disk")
 async def disk():
     return {"free": await ollama.disk_free()}
+
+
+@app.get("/api/ollama/state")
+async def ollama_state():
+    return {
+        "binary": bool(ollama.find_binary()),
+        "server": (await ollama.server_status())["ok"],
+        "install_supported": ollama_setup.artifact_url() is not None,
+    }
+
+
+@app.post("/api/ollama/start")
+async def ollama_start():
+    return await ollama.ensure_running()
+
+
+@app.post("/api/ollama/install")
+async def ollama_install():
+    async def stream():
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def send(obj):
+            await queue.put(obj)
+
+        async def run():
+            try:
+                await ollama_setup.install(send)
+            finally:
+                await queue.put({"__done": True})
+
+        task = asyncio.create_task(run())
+        try:
+            while True:
+                evt = await queue.get()
+                if evt.get("__done"):
+                    break
+                yield json.dumps(evt) + "\n"
+        finally:
+            task.cancel()
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 
 class PullRequest(BaseModel):

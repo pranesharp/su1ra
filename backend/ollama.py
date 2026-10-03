@@ -90,6 +90,18 @@ async def server_status():
 
 
 def find_binary():
+    import sys
+
+    app_root = (
+        Path(sys.executable).resolve().parent
+        if getattr(sys, "frozen", False)
+        else Path(__file__).resolve().parent.parent
+    )
+    for sub in ("ollama", "ollama/bin"):
+        for name in ("ollama.exe", "ollama"):
+            p = app_root / sub / name
+            if p.exists():
+                return str(p)
     found = shutil.which("ollama")
     if found:
         return found

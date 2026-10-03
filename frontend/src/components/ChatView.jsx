@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
+import OllamaSetup from './OllamaSetup'
 
 function displayizeSingleLine(seg) {
   return seg
@@ -179,7 +180,7 @@ function AssistantContent({ content, toolCalls, streaming, onLoadToIde, onRunCod
   )
 }
 
-export default function ChatView({ messages, status, streaming, showStats, onLoadToIde, onRunCode, onDownloadArtifact, onOpenArtifact }) {
+export default function ChatView({ messages, status, streaming, showStats, onLoadToIde, onRunCode, onDownloadArtifact, onOpenArtifact, onOllamaReady }) {
   const scrollRef = useRef(null)
   const stickRef = useRef(true)
 
@@ -204,7 +205,10 @@ export default function ChatView({ messages, status, streaming, showStats, onLoa
             <p>// type /help for commands, or just start typing</p>
             <p>// before you begin: check /settings — pull models, pick an accent, tune your chat</p>
             {status && !status.ok && (
-              <p className="warn">// cannot reach the ollama server — /settings to fix the url</p>
+              <>
+                <p className="warn">// cannot reach the ollama server — /settings to fix the url</p>
+                <OllamaSetup onResolved={onOllamaReady} />
+              </>
             )}
           </div>
         ) : (

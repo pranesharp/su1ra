@@ -104,9 +104,10 @@ def find_ollama_binary():
         bundled = Path(sys.executable).resolve().parent / "ollama"
     else:
         bundled = PROJECT_ROOT / "ollama"
-    for name in ("ollama.exe", "ollama"):
-        if (bundled / name).exists():
-            return str(bundled / name)
+    for sub in (".", "bin"):
+        for name in ("ollama.exe", "ollama"):
+            if (bundled / sub / name).exists():
+                return str(bundled / sub / name)
     found = shutil.which("ollama")
     if found:
         return found
