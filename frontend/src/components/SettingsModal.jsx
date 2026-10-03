@@ -16,13 +16,31 @@ function nearestIndex(value) {
   return best
 }
 
-export default function SettingsModal({ status, conversation, accent, sandboxTools, onSave, onClose, onOpenModels }) {
+export default function SettingsModal({ status, conversation, accent, sandboxTools, model, onSave, onClose, onOpenModels }) {
   const [ollamaUrl, setOllamaUrl] = useState(status?.url || 'http://localhost:11434')
   const [systemPrompt, setSystemPrompt] = useState(conversation?.system_prompt || '')
   const [temperature, setTemperature] = useState(conversation?.temperature ?? 0.7)
   const [ctxIndex, setCtxIndex] = useState(nearestIndex(conversation?.context_length || 0))
+  const [ctxText, setCtxText] = useState(conversation?.context_length ? String(conversation.context_length) : '')
+  const [nativeCtx, setNativeCtx] = useState(0)
   const [selectedAccent, setSelectedAccent] = useState(accent || DEFAULT_ACCENT)
   const [sandboxOn, setSandboxOn] = useState(sandboxTools !== false)
+
+  useEffect(() => {
+    let alive = true
+    if (model) {
+      fetch(`/api/model/ctx?model=${encodeURIComponent(model)}`)
+        .then((r) => r.json())
+        .then((d) => { if (alive) setNativeCtx(d.context_length || 0) })
+        .catch(() => {})
+    }
+    return () => { alive = false }
+  }, [model])
+
+  const steps = nativeCtx > CTX_STEPS[CTX_STEPS.length - 1] ? [...CTX_STEPS, nativeCtx] : CTX_STEPS
+  const safeIndex = Math.min(ctxIndex, steps.length - 1)
+  const savedCtx = ctxText.trim() === '' ? steps[safeIndex] : Math.max(0, parseInt(ctxText, 10) || 0)
+  const ctxWarn = nativeCtx > 0 && savedCtx > nativeCtx
 
   useEffect(() => {
     function onKey(e) {
@@ -32,7 +50,6 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  const pct = (ctxIndex / (CTX_STEPS.length - 1)) * 100
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -87,19 +104,38 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
             <input
               type="range"
               min="0"
-              max={CTX_STEPS.length - 1}
+              max={steps.length - 1}
               step="1"
               className="ctx-slider"
-              style={{ background: `linear-gradient(to right, var(--accent) ${pct}%, #26262c ${pct}%)` }}
-              value={ctxIndex}
-              onChange={(e) => setCtxIndex(Number(e.target.value))}
+              style={{ background: `linear-gradient(to right, var(--accent) ${(safeIndex / (steps.length - 1)) * 100}%, #26262c ${(safeIndex / (steps.length - 1)) * 100}%)` }}
+              value={safeIndex}
+              onChange={(e) => {
+                const i = Number(e.target.value)
+                setCtxIndex(i)
+                setCtxText(steps[i] ? String(steps[i]) : '')
+              }}
             />
-            <span className="slider-value">{fmtTokens(CTX_STEPS[ctxIndex])}</span>
+            <input
+              type="text"
+              inputMode="numeric"
+              className="ctx-input"
+              value={ctxText}
+              placeholder="default"
+              onChange={(e) => {
+                const digits = e.target.value.replace(/[^0-9]/g, '').slice(0, 7)
+                setCtxText(digits)
+                const n = parseInt(digits, 10)
+                setCtxIndex(isNaN(n) ? 0 : nearestIndex(n > CTX_STEPS[CTX_STEPS.length - 1] ? CTX_STEPS[CTX_STEPS.length - 1] : n))
+              }}
+            />
           </div>
           <div className="slider-scale">
             <span>default</span>
-            <span>128k</span>
+            <span>{nativeCtx > 0 ? `model max ${fmtTokens(nativeCtx)}` : `${fmtTokens(steps[steps.length - 1])}`}</span>
           </div>
+          {ctxWarn && (
+            <p className="ctx-warn">// above {model}'s trained window ({fmtTokens(nativeCtx)}) — quality will degrade</p>
+          )}
         </label>
         <label className="sandbox-row">
           <input
@@ -122,7 +158,7 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
                 ollamaUrl: ollamaUrl.trim(),
                 systemPrompt,
                 temperature,
-                contextLength: CTX_STEPS[ctxIndex],
+                contextLength: savedCtx,
                 accent: selectedAccent,
                 sandboxTools: sandboxOn,
               })

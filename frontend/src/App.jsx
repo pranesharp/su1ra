@@ -618,6 +618,7 @@ export default function App() {
           <SettingsModal
             status={status}
             conversation={activeConversation}
+            model={activeConversation?.model || ''}
             accent={accent}
             sandboxTools={sandboxTools}
             onSave={saveSettings}

@@ -208,6 +208,11 @@ async def models():
     return {"models": await ollama.list_models()}
 
 
+@app.get("/api/model/ctx")
+async def model_ctx(model: str):
+    return {"context_length": await ollama.model_context_length(model)}
+
+
 class PullRequest(BaseModel):
     model: str
 

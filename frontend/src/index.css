@@ -1177,3 +1177,25 @@ button {
   opacity: 0.45;
   cursor: default;
 }
+
+.ctx-input {
+  width: 84px;
+  padding: 4px 8px;
+  background: #16161b;
+  border: 1px solid #26262c;
+  border-radius: 3px;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: right;
+}
+.ctx-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.ctx-warn {
+  color: var(--accent);
+  font-size: 11px;
+  margin: 6px 0 0;
+  opacity: 0.9;
+}

@@ -19,6 +19,7 @@ def base_url():
 
 
 _capabilities_cache = {}
+_ctx_cache = {}
 
 
 async def model_supports_tools(model):
@@ -35,6 +36,25 @@ async def model_supports_tools(model):
     supported = "tools" in caps
     _capabilities_cache[model] = supported
     return supported
+
+
+async def model_context_length(model):
+    if model in _ctx_cache:
+        return _ctx_cache[model]
+    base = base_url()
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(f"{base}/api/show", json={"model": model})
+            resp.raise_for_status()
+            info = resp.json().get("model_info") or {}
+            ctx = 0
+            for key, value in info.items():
+                if key.endswith(".context_length") and isinstance(value, int):
+                    ctx = max(ctx, value)
+    except Exception:
+        return 0
+    _ctx_cache[model] = ctx
+    return ctx
 
 
 async def server_status():
