@@ -47,7 +47,7 @@ React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
 
 ## Install
 
-### Windows [ WILL BE RELEASING SOON-STILL IN DEVELOPMENT]
+### Windows [ WILL BE RELEASING SOON-STILL IN DEVELOPMENT ]
 
 Download `Su1ra-setup-x64.exe` from releases and run it. The installer offers to fetch the Ollama server (command-line engine only — Su1ra is the GUI and starts/stops it for you); if you already have Ollama installed, uncheck it. A full Ollama desktop app option (its own chat GUI + tray icon) is available as an alternative.
 
