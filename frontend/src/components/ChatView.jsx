@@ -202,6 +202,7 @@ export default function ChatView({ messages, status, streaming, showStats, onLoa
             <h1>chat with your local models<span className="cursor" /></h1>
             <p>// everything runs on your machine</p>
             <p>// type /help for commands, or just start typing</p>
+            <p>// before you begin: check /settings — pull models, pick an accent, tune your chat</p>
             {status && !status.ok && (
               <p className="warn">// cannot reach the ollama server — /settings to fix the url</p>
             )}
