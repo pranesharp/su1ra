@@ -30,6 +30,14 @@ DIST = PROJECT_ROOT / "frontend" / "dist"
 store.init_db()
 
 app = FastAPI(title="Su1ra")
+
+
+@app.on_event("startup")
+async def reset_session_settings():
+    for key in ("show_stats", "ide_open"):
+        store.set_setting(key, "0")
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
