@@ -747,8 +747,10 @@ button {
   gap: 12px;
 }
 
-.ctx-slider {
-  flex: 1;
+.modal .ctx-slider {
+  flex: 1 1 auto;
+  min-width: 60px;
+  width: auto;
   -webkit-appearance: none;
   appearance: none;
   height: 4px;
@@ -1208,8 +1210,9 @@ button {
   cursor: default;
 }
 
-.ctx-input {
+.modal .ctx-input {
   width: 84px;
+  flex: 0 0 84px;
   padding: 4px 8px;
   background: #16161b;
   border: 1px solid #26262c;
