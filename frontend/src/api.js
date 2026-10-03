@@ -35,6 +35,7 @@ export const updateConversation = (id, patch) => sendJSON(`/api/conversations/${
 export const deleteConversation = (id) => sendJSON(`/api/conversations/${id}`, 'DELETE')
 
 export const saveSettings = (data) => sendJSON('/api/settings', 'PATCH', data)
+export const downloadArtifact = (content, filename) => sendJSON('/api/download', 'POST', { content, filename })
 
 export const ejectServer = () => sendJSON('/api/eject', 'POST')
 

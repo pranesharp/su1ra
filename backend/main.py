@@ -615,6 +615,35 @@ async def run_input(body: RunInput):
     return {"ok": True}
 
 
+class DownloadBody(BaseModel):
+    content: str
+    filename: str | None = None
+
+
+@app.post("/api/download")
+async def download_artifact(body: DownloadBody):
+    if len(body.content) > 5_000_000:
+        raise HTTPException(413, "Artifact too large (5MB limit)")
+    name = body.filename or "artifact"
+    name = re.sub(r"[^A-Za-z0-9_-]", "-", name).strip("-") or "artifact"
+    downloads = Path.home() / "Downloads"
+    try:
+        downloads.mkdir(exist_ok=True)
+        target_dir = downloads
+    except OSError:
+        target_dir = Path.home()
+    final = None
+    for i in range(1, 1000):
+        candidate = target_dir / f"su1ra-{name}{'' if i == 1 else f'-{i}'}.html"
+        if not candidate.exists():
+            final = candidate
+            break
+    if final is None:
+        raise HTTPException(409, "Could not pick a file name")
+    final.write_text(body.content, encoding="utf-8")
+    return {"ok": True, "path": str(final)}
+
+
 @app.get("/{full_path:path}")
 async def spa(full_path: str):
     if full_path.startswith("api/"):

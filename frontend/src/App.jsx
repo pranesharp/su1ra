@@ -6,6 +6,7 @@ import Composer from './components/Composer.jsx'
 import Logo from './components/Logo.jsx'
 import SettingsModal from './components/SettingsModal.jsx'
 import IdePane from './components/IdePane.jsx'
+import ArtifactPane from './components/ArtifactPane.jsx'
 
 const COMMANDS = [
   { cmd: '/help', desc: 'show available commands' },
@@ -41,6 +42,8 @@ export default function App() {
   const [ideWidth, setIdeWidth] = useState(460)
   const [ideCode, setIdeCode] = useState(STARTER_CODE)
   const [ideOutput, setIdeOutput] = useState({ text: '', exitCode: null })
+  const [artifact, setArtifact] = useState(null)
+  const [artifactTab, setArtifactTab] = useState('preview')
   const abortRef = useRef(null)
   const pendingToolRef = useRef(null)
   const ideRunSeenRef = useRef(null)
@@ -376,7 +379,9 @@ export default function App() {
       .map((p) => p.text)
       .join('\n')
     const block = extractLastPythonBlock(visible)
-    if (block) loadToIde(block)
+    const html = extractLastHtmlBlock(visible)
+    if (html) openArtifact(html)
+    else if (block) loadToIde(block)
     const convs = await api.getConversations()
     setConversations(convs.conversations)
   }
@@ -396,7 +401,32 @@ export default function App() {
     return last
   }
 
+  function extractLastHtmlBlock(text) {
+    const blocks = [...text.matchAll(/```html\n([\s\S]*?)```/g)]
+    const last = blocks.length ? blocks[blocks.length - 1][1].replace(/\n$/, '') : null
+    return last
+  }
+
+  function openArtifact(code) {
+    setArtifact(code)
+    setArtifactTab('preview')
+    if (!ideOpen) {
+      setIdeOpen(true)
+      api.saveSettings({ ide_open: true })
+    }
+  }
+
+  async function downloadArtifact(code) {
+    try {
+      const res = await api.downloadArtifact(code)
+      pushSystem(`// artifact saved to ${res.path}`)
+    } catch (err) {
+      pushSystem(`// download failed: ${err.message}`)
+    }
+  }
+
   function loadToIde(code) {
+    setArtifact(null)
     setIdeCode(code)
     if (!ideOpen) {
       setIdeOpen(true)
@@ -406,6 +436,7 @@ export default function App() {
   }
 
   function runInIde(code) {
+    setArtifact(null)
     setIdeCode(code)
     if (!ideOpen) {
       setIdeOpen(true)
@@ -491,22 +522,33 @@ export default function App() {
             <span className="meta-model"> · model: {currentModel || 'none'}</span>
           </div>
         </header>
-        <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} onLoadToIde={loadToIde} onRunCode={runInIde} />
+        <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} onLoadToIde={loadToIde} onRunCode={runInIde} onDownloadArtifact={downloadArtifact} onOpenArtifact={openArtifact} />
         <Composer commands={COMMANDS} disabled={!currentModel} streaming={streaming} onSend={send} onStop={stop} />
       </main>
       {ideOpen && (
         <>
           <div className="ide-resize" onMouseDown={startResize} />
-          <IdePane
-            width={ideWidth}
-            code={ideCode}
-            onCodeChange={setIdeCode}
-            onClose={closeIde}
-            onResizeStart={startResize}
-            onOutputChange={setIdeOutput}
-            onSendToChat={sendIdeToChat}
-            runSignal={runSignal}
-          />
+          {artifact !== null ? (
+            <ArtifactPane
+              width={ideWidth}
+              code={artifact}
+              tab={artifactTab}
+              onTab={setArtifactTab}
+              onClose={closeIde}
+              onDownload={() => downloadArtifact(artifact)}
+            />
+          ) : (
+            <IdePane
+              width={ideWidth}
+              code={ideCode}
+              onCodeChange={setIdeCode}
+              onClose={closeIde}
+              onResizeStart={startResize}
+              onOutputChange={setIdeOutput}
+              onSendToChat={sendIdeToChat}
+              runSignal={runSignal}
+            />
+          )}
         </>
       )}
       {settingsOpen && (
