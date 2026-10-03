@@ -1,4 +1,4 @@
-# Su1ra
+# Su1ra (सूत्र)
 
 A local, terminal style desktop gui app for [Ollama][Backend]( : https://ollama.com) models. Removing the hassle of setting up agentic and tool calls externally for Ollama.
 Everything runs on your machine, your models, your data, no cloud, no accounts.
