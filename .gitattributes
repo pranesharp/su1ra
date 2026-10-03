@@ -1,0 +1,2 @@
+# GitHub language stats: lockfiles are generated, not authored code
+frontend/yarn.lock linguist-generated=true
