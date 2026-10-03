@@ -1,5 +1,6 @@
 # Su1ra (सूत्र)
 
+THE BEST harness for your LOCAL AI agentic work - simple UI for simple setup and simple work right away.
 A local, terminal style desktop gui app for [Ollama][Backend]( : https://ollama.com) models. Removing the hassle of setting up agentic and tool calls externally for Ollama.
 Everything runs on your machine, your models, your data, no cloud, no accounts.
 
