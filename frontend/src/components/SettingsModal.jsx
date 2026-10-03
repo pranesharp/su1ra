@@ -8,10 +8,10 @@ function fmtTokens(n) {
   return n >= 1024 ? `${n / 1024}k` : String(n)
 }
 
-function nearestIndex(value) {
+function nearestIndex(value, list) {
   let best = 0
-  CTX_STEPS.forEach((v, i) => {
-    if (Math.abs(v - value) < Math.abs(CTX_STEPS[best] - value)) best = i
+  list.forEach((v, i) => {
+    if (Math.abs(v - value) < Math.abs(list[best] - value)) best = i
   })
   return best
 }
@@ -20,7 +20,6 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
   const [ollamaUrl, setOllamaUrl] = useState(status?.url || 'http://localhost:11434')
   const [systemPrompt, setSystemPrompt] = useState(conversation?.system_prompt || '')
   const [temperature, setTemperature] = useState(conversation?.temperature ?? 0.7)
-  const [ctxIndex, setCtxIndex] = useState(nearestIndex(conversation?.context_length || 0))
   const [ctxText, setCtxText] = useState(conversation?.context_length ? String(conversation.context_length) : '')
   const [nativeCtx, setNativeCtx] = useState(0)
   const [selectedAccent, setSelectedAccent] = useState(accent || DEFAULT_ACCENT)
@@ -38,8 +37,10 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
   }, [model])
 
   const steps = nativeCtx > CTX_STEPS[CTX_STEPS.length - 1] ? [...CTX_STEPS, nativeCtx] : CTX_STEPS
-  const safeIndex = Math.min(ctxIndex, steps.length - 1)
-  const savedCtx = ctxText.trim() === '' ? steps[safeIndex] : Math.max(0, parseInt(ctxText, 10) || 0)
+  const maxStep = steps[steps.length - 1]
+  // single source of truth: the textbox. empty = default (0). slider always derived from it.
+  const savedCtx = ctxText.trim() === '' ? 0 : Math.max(0, parseInt(ctxText, 10) || 0)
+  const sliderIndex = nearestIndex(Math.min(savedCtx, maxStep), steps)
   const ctxWarn = nativeCtx > 0 && savedCtx > nativeCtx
 
   useEffect(() => {
@@ -107,12 +108,11 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
               max={steps.length - 1}
               step="1"
               className="ctx-slider"
-              style={{ background: `linear-gradient(to right, var(--accent) ${(safeIndex / (steps.length - 1)) * 100}%, #26262c ${(safeIndex / (steps.length - 1)) * 100}%)` }}
-              value={safeIndex}
+              style={{ background: `linear-gradient(to right, var(--accent) ${(sliderIndex / (steps.length - 1)) * 100}%, #26262c ${(sliderIndex / (steps.length - 1)) * 100}%)` }}
+              value={sliderIndex}
               onChange={(e) => {
-                const i = Number(e.target.value)
-                setCtxIndex(i)
-                setCtxText(steps[i] ? String(steps[i]) : '')
+                const v = steps[Number(e.target.value)] || 0
+                setCtxText(v ? String(v) : '')
               }}
             />
             <input
@@ -124,8 +124,6 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
               onChange={(e) => {
                 const digits = e.target.value.replace(/[^0-9]/g, '').slice(0, 7)
                 setCtxText(digits)
-                const n = parseInt(digits, 10)
-                setCtxIndex(isNaN(n) ? 0 : nearestIndex(n > CTX_STEPS[CTX_STEPS.length - 1] ? CTX_STEPS[CTX_STEPS.length - 1] : n))
               }}
             />
           </div>

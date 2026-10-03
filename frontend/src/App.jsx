@@ -59,6 +59,7 @@ export default function App() {
   const ideRunSeenRef = useRef(null)
   const [runSignal, setRunSignal] = useState(0)
   const idRef = useRef(1000)
+  const chatDefaultsRef = useRef({ system_prompt: '', temperature: 0.7, context_length: 0 })
   const widthRef = useRef(460)
   const moveRef = useRef(null)
   const upRef = useRef(null)
@@ -77,6 +78,11 @@ export default function App() {
       ])
       setStatus(statusRes)
       setAccent(settingsRes.accent || DEFAULT_ACCENT)
+      chatDefaultsRef.current = {
+        system_prompt: settingsRes.default_system_prompt || '',
+        temperature: typeof settingsRes.default_temperature === 'number' ? settingsRes.default_temperature : 0.7,
+        context_length: settingsRes.default_context_length || 0,
+      }
       setShowStats(settingsRes.show_stats === true)
       setIdeOpen(settingsRes.ide_open === true)
       setIdeWidth(typeof settingsRes.ide_width === 'number' ? settingsRes.ide_width : 460)
@@ -124,7 +130,7 @@ export default function App() {
 
   async function newChat() {
     if (blocked) return
-    const conversation = await api.createConversation({ model: selectedModel })
+    const conversation = await api.createConversation({ model: selectedModel, ...chatDefaultsRef.current })
     setConversations((prev) => [conversation, ...prev])
     setActiveId(conversation.id)
     setMessages([])
@@ -391,7 +397,7 @@ export default function App() {
     if (!selectedModel) return
     let convId = activeId
     if (!activeConversation) {
-      const conversation = await api.createConversation({ model: selectedModel })
+      const conversation = await api.createConversation({ model: selectedModel, ...chatDefaultsRef.current })
       convId = conversation.id
       setConversations((prev) => [conversation, ...prev])
       setActiveId(convId)
@@ -603,7 +609,15 @@ export default function App() {
   }
 
   async function saveSettings({ ollamaUrl, systemPrompt, temperature, contextLength, accent: newAccent, sandboxTools: sandboxPref }) {
-    await api.saveSettings({ ollama_url: ollamaUrl, accent: newAccent, ...(sandboxPref === undefined ? {} : { sandbox_tools: sandboxPref }) })
+    await api.saveSettings({
+      ollama_url: ollamaUrl,
+      accent: newAccent,
+      ...(sandboxPref === undefined ? {} : { sandbox_tools: sandboxPref }),
+      default_system_prompt: systemPrompt,
+      default_temperature: temperature,
+      default_context_length: contextLength,
+    })
+    chatDefaultsRef.current = { system_prompt: systemPrompt, temperature, context_length: contextLength }
     setStatus(await api.getStatus())
     setAccent(newAccent)
     if (activeConversation) {

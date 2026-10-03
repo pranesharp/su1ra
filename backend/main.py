@@ -187,6 +187,9 @@ class SettingsUpdate(BaseModel):
     ide_open: bool | None = None
     ide_width: int | None = None
     sandbox_tools: bool | None = None
+    default_system_prompt: str | None = None
+    default_temperature: float | None = None
+    default_context_length: int | None = None
 
 
 class RunRequest(BaseModel):
@@ -315,6 +318,9 @@ async def get_settings():
         "ide_open": store.get_setting("ide_open") == "1",
         "ide_width": int(store.get_setting("ide_width") or 460),
         "sandbox_tools": store.get_setting("sandbox_tools") != "0",
+        "default_system_prompt": store.get_setting("default_system_prompt") or "",
+        "default_temperature": float(store.get_setting("default_temperature") or 0.7),
+        "default_context_length": int(store.get_setting("default_context_length") or 0),
     }
 
 
@@ -327,8 +333,17 @@ async def update_settings(body: SettingsUpdate):
         and body.ide_open is None
         and body.ide_width is None
         and body.sandbox_tools is None
+        and body.default_system_prompt is None
+        and body.default_temperature is None
+        and body.default_context_length is None
     ):
         raise HTTPException(422, "nothing to update")
+    if body.default_system_prompt is not None:
+        store.set_setting("default_system_prompt", body.default_system_prompt)
+    if body.default_temperature is not None:
+        store.set_setting("default_temperature", str(body.default_temperature))
+    if body.default_context_length is not None:
+        store.set_setting("default_context_length", str(max(0, int(body.default_context_length))))
     if body.ollama_url is not None:
         if not body.ollama_url.startswith(("http://", "https://")):
             raise HTTPException(422, "ollama_url must start with http:// or https://")
