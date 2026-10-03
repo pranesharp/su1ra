@@ -80,6 +80,9 @@ Windows (run on a Windows machine in the activated venv, with [Inno Setup 6](htt
 ```bat
 packaging\build-windows.bat
 ```
+## Acknowledgements
+*This project was developed with the assistance of zai/glm5.3-flash for drafting , testing, and debugging and code.*
+
 
 ## Data
 
