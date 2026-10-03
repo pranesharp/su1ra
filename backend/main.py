@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 import ollama
+import puller
 import runner
 import store
 
@@ -205,6 +206,52 @@ async def status():
 @app.get("/api/models")
 async def models():
     return {"models": await ollama.list_models()}
+
+
+class PullRequest(BaseModel):
+    model: str
+
+
+@app.post("/api/models/pull")
+async def pull_model(body: PullRequest):
+    name = body.model.strip()
+    if not name:
+        raise HTTPException(422, "model name required")
+
+    async def event_stream():
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def send(obj):
+            await queue.put(obj)
+
+        async def run():
+            try:
+                await puller.pull(name, send)
+            finally:
+                await queue.put({"__done": True})
+
+        task = asyncio.create_task(run())
+        try:
+            while True:
+                evt = await queue.get()
+                if evt.get("__done"):
+                    break
+                yield json.dumps(evt) + "\n"
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except BaseException:
+                    pass
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
+
+@app.post("/api/models/pull/cancel")
+async def cancel_pull(body: PullRequest):
+    puller.cancel(body.model.strip())
+    return {"ok": True}
 
 
 @app.get("/api/settings")

@@ -10,7 +10,7 @@ import ArtifactPane from './components/ArtifactPane.jsx'
 
 const COMMANDS = [
   { cmd: '/help', desc: 'show available commands' },
-  { cmd: '/models', desc: 'list models — /models <name|n> to select, /models get [query] to browse the library' },
+  { cmd: '/models', desc: 'list models — /models <name|n> to select, /models pull <name> to download, /models get [query] to browse' },
   { cmd: '/newchat', desc: 'start a new conversation' },
   { cmd: '/chats', desc: 'list chats — /chats <n|id> to open' },
   { cmd: '/delchat', desc: 'delete a chat — /delchat <n|id>' },
@@ -48,6 +48,7 @@ export default function App() {
   const [codeArmed, setCodeArmed] = useState(false)
   const [sandboxTools, setSandboxTools] = useState(true)
   const abortRef = useRef(null)
+  const modelPullRef = useRef(null)
   const pendingToolRef = useRef(null)
   const ideRunSeenRef = useRef(null)
   const [runSignal, setRunSignal] = useState(0)
@@ -171,6 +172,46 @@ export default function App() {
         const query = arg.slice(3).trim()
         const url = query ? `https://ollama.com/search?q=${encodeURIComponent(query)}` : 'https://ollama.com/search'
         pushSystem(`${echo}\n\n// browse the ollama model library:\n${url}`)
+        return
+      }
+      if (arg === 'pull' || arg.startsWith('pull ')) {
+        const name = arg.slice(4).trim()
+        if (!name) {
+          if (modelPullRef.current) {
+            modelPullRef.current.abort()
+            modelPullRef.current = null
+            return
+          }
+          pushSystem(`${echo}\n\n// usage: /models pull <model> — e.g. /models pull deepseek-r1:1.5b`)
+          return
+        }
+        const fmt = (b) => (b >= 1073741824 ? (b / 1073741824).toFixed(2) + ' GB' : Math.round(b / 1048576) + ' MB')
+        const pullId = ++idRef.current
+        const ctrl = new AbortController()
+        modelPullRef.current = ctrl
+        setMessages((prev) => [...prev, { id: pullId, role: 'system', content: `${echo}\n\n// pulling ${name}…` }])
+        try {
+          await api.pullModel(
+            name,
+            (evt) => {
+              let line
+              if (evt.error) line = `// pull failed: ${evt.error}`
+              else if (evt.status === 'success') line = `// pulled ${name} — select with: /models ${name}`
+              else if (evt.pct !== undefined)
+                line = `// pulling ${name}… ${evt.pct}% (${fmt(evt.completed)} / ${fmt(evt.total)})`
+              else line = `// ${evt.status} ${name}`
+              setMessages((prev) => prev.map((m) => (m.id === pullId ? { ...m, content: `${echo}\n\n${line}` } : m)))
+            },
+            ctrl.signal,
+          )
+          const modelsRes = await api.getModels()
+          setModels(modelsRes.models)
+        } catch (err) {
+          const msg = ctrl.signal.aborted ? '// pull cancelled' : `// pull failed: ${err.message}`
+          setMessages((prev) => prev.map((m) => (m.id === pullId ? { ...m, content: `${echo}\n\n${msg}` } : m)))
+        } finally {
+          modelPullRef.current = null
+        }
         return
       }
       if (!arg) {
@@ -579,6 +620,7 @@ export default function App() {
             sandboxTools={sandboxTools}
             onSave={saveSettings}
             onClose={() => setSettingsOpen(false)}
+            onModelsChanged={() => api.getModels().then((r) => setModels(r.models))}
           />
       )}
     </div>

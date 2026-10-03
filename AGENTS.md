@@ -61,3 +61,12 @@ This file carries project context across machines/sessions. Keep it current.
   links to `releases/latest/download/Su1ra-setup-x64.exe`)
 - Engine-agnostic backend (OpenAI-compatible adapter; custom server URL)
 - Chat export, RAG via Ollama embeddings, image input, streaming tool rounds
+
+## Model downloads (commit pending)
+
+- `POST /api/models/pull` streams Ollama's pull progress as NDJSON; client disconnect or
+  `POST /api/models/pull/cancel` aborts the pull server-side (`backend/puller.py`).
+- Two UIs: console `/models pull <name>` (live-updating system line, bare `/models pull`
+  cancels a running pull) and a Settings-modal section (chips + progress bar + cancel).
+- No in-app catalog browsing (undocumented API) — typed names + curated chips; `/models get`
+  opens the ollama.com library for discovery.

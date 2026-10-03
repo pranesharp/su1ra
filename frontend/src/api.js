@@ -22,6 +22,36 @@ export const getStatus = () => getJSON('/api/status')
 
 export const getModels = () => getJSON('/api/models')
 
+export const cancelPull = (model) => sendJSON('/api/models/pull/cancel', 'POST', { model })
+
+export async function pullModel(model, onEvent, signal) {
+  const resp = await fetch('/api/models/pull', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model }),
+    signal,
+  })
+  if (!resp.ok) {
+    const err = new Error(`pull failed (${resp.status})`)
+    await resp.body?.cancel()
+    throw err
+  }
+  const reader = resp.body.getReader()
+  const dec = new TextDecoder()
+  let buf = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += dec.decode(value, { stream: true })
+    let nl
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim()
+      buf = buf.slice(nl + 1)
+      if (line) onEvent(JSON.parse(line))
+    }
+  }
+}
+
 export const getSettings = () => getJSON('/api/settings')
 
 export const getConversations = () => getJSON('/api/conversations')

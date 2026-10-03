@@ -1020,3 +1020,63 @@ button {
   font-size: 11px;
   opacity: 0.85;
 }
+
+.pull-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid #26262c;
+  padding-top: 12px;
+}
+.pull-section > span {
+  font-size: 11px;
+  opacity: 0.85;
+}
+.pull-row {
+  display: flex;
+  gap: 8px;
+}
+.pull-row input {
+  flex: 1;
+}
+.pull-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pull-chips .chip {
+  font-family: inherit;
+  font-size: 11px;
+  background: transparent;
+  border: 1px solid #26262c;
+  color: var(--text-dim, #9a9aa3);
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.pull-chips .chip:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text, #e6e6ea);
+}
+.pull-chips .chip:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.pull-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+}
+.pull-bar {
+  height: 4px;
+  background: #26262c;
+  overflow: hidden;
+}
+.pull-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+.pull-err {
+  color: #ff5c5c;
+}
