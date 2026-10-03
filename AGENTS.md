@@ -71,3 +71,11 @@ This file carries project context across machines/sessions. Keep it current.
   cancels a running pull) and a Settings-modal section (chips + progress bar + cancel).
 - No in-app catalog browsing (undocumented API) — typed names + curated chips; `/models get`
   opens the ollama.com library for discovery.
+
+## Model hub (separate window)
+
+- Settings modal has a `[ pull models ]` button that closes settings and opens the
+  ModelHub modal (frontend/src/components/ModelHub.jsx): pull box on top, starter
+  catalog below with per-row pull/progress and `[ installed ]` state from /api/models.
+- CATALOG in ModelHub.jsx is hardcoded — user wants a researched, spec-rich catalog
+  list in a follow-up pass. Inline pull progress bar lives in the row being pulled.

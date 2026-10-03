@@ -1080,3 +1080,61 @@ button {
 .pull-err {
   color: #ff5c5c;
 }
+
+.modal-wide {
+  width: min(640px, 92vw);
+}
+.hub-launch {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-top: 1px solid #26262c;
+  padding-top: 12px;
+  font-size: 11px;
+}
+.hub-launch span {
+  opacity: 0.85;
+}
+.hub-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #26262c;
+  margin-top: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.hub-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #1c1c22;
+}
+.hub-row:last-child {
+  border-bottom: none;
+}
+.hub-row.pulling {
+  background: rgba(255, 255, 255, 0.03);
+}
+.hub-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.hub-name {
+  color: var(--text);
+  font-size: 12px;
+}
+.hub-specs {
+  color: var(--muted);
+  font-size: 11px;
+}
+.hub-bar {
+  width: 160px;
+}
+.hub-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 8px 0 0;
+}

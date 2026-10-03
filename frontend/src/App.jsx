@@ -5,6 +5,7 @@ import ChatView, { splitThinking } from './components/ChatView.jsx'
 import Composer from './components/Composer.jsx'
 import Logo from './components/Logo.jsx'
 import SettingsModal from './components/SettingsModal.jsx'
+import ModelHub from './components/ModelHub.jsx'
 import IdePane from './components/IdePane.jsx'
 import ArtifactPane from './components/ArtifactPane.jsx'
 
@@ -37,6 +38,7 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [modelHubOpen, setModelHubOpen] = useState(false)
   const [accent, setAccent] = useState(DEFAULT_ACCENT)
   const [showStats, setShowStats] = useState(false)
   const [ideOpen, setIdeOpen] = useState(false)
@@ -620,8 +622,15 @@ export default function App() {
             sandboxTools={sandboxTools}
             onSave={saveSettings}
             onClose={() => setSettingsOpen(false)}
-            onModelsChanged={() => api.getModels().then((r) => setModels(r.models))}
+            onOpenModels={() => { setSettingsOpen(false); setModelHubOpen(true) }}
           />
+      )}
+      {modelHubOpen && (
+        <ModelHub
+          models={models}
+          onModelsChanged={() => api.getModels().then((r) => setModels(r.models))}
+          onClose={() => setModelHubOpen(false)}
+        />
       )}
     </div>
   )
