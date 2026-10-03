@@ -1,7 +1,7 @@
 # Su1ra
 
-A local-first, terminal-styled desktop chat app for [Ollama](https://ollama.com) models.
-Everything runs on your machine — your models, your data, no cloud, no accounts.
+A local, terminal style desktop gui app for [Ollama][Backend]( : https://ollama.com) models. Removing the hassle of setting up agentic and tool calls externally for Ollama.
+Everything runs on your machine, your models, your data, no cloud, no accounts.
 
 ```
 React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
