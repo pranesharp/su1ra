@@ -5,7 +5,7 @@ import { pullModel, cancelPull } from '../api'
 const CTX_STEPS = [0, 512, 1024, 2048, 4096, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 131072]
 
 const SUGGESTED_MODELS = [
-  { name: 'ornithomancer-1.5:9b', size: '4.9 GB' },
+  { name: 'ornith-1.5:9b', size: '6.6 GB' },
   { name: 'deepseek-r1:1.5b', size: '1.1 GB' },
   { name: 'llama3.2:3b', size: '2.0 GB' },
   { name: 'qwen2.5:7b', size: '4.7 GB' },

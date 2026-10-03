@@ -39,7 +39,8 @@ This file carries project context across machines/sessions. Keep it current.
 
 ## Model notes
 
-- Tested with `ornithomancer-1.5:9b` (native tool calls work well) and
+- Tested with `ornith-1.5:9b` (official ollama library model — qwen35 base, 9B, 262k ctx,
+  Q4_K_M; capabilities: tools, thinking, vision; native tool calls work well) and
   `deepseek-r1:1.5b` (never emits tool_calls; needs the content-fallback path).
 - qwen2.5-coder:7b was removed by the user; don't assume it's installed.
 
