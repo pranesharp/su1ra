@@ -18,6 +18,7 @@ const COMMANDS = [
   { cmd: '/eject', desc: 'shut down the ollama server instantly' },
   { cmd: '/connect', desc: 'start / reconnect the ollama server' },
   { cmd: '/stats', desc: 'toggle per-reply performance stats' },
+  { cmd: '/code', desc: 'toggle code mode — the model may run code; /code <msg> arms one message' },
   { cmd: '/ide', desc: 'toggle the python ide pane' },
 ]
 
@@ -44,6 +45,7 @@ export default function App() {
   const [ideOutput, setIdeOutput] = useState({ text: '', exitCode: null })
   const [artifact, setArtifact] = useState(null)
   const [artifactTab, setArtifactTab] = useState('preview')
+  const [codeArmed, setCodeArmed] = useState(false)
   const abortRef = useRef(null)
   const pendingToolRef = useRef(null)
   const ideRunSeenRef = useRef(null)
@@ -275,6 +277,21 @@ export default function App() {
       return
     }
 
+    if (cmd === '/code') {
+      const rest = arg
+      if (rest) {
+        pushSystem(`${echo}\n\n// one-shot: tools armed for this message`)
+        await send(rest, { forceArmed: true })
+      } else {
+        const next = !codeArmed
+        setCodeArmed(next)
+        pushSystem(
+          `${echo}\n\n${next ? '// code mode: on — the model may run code (persists until /code again, off on restart)' : '// code mode: off'}`,
+        )
+      }
+      return
+    }
+
     pushSystem(`${echo}\n\n// unknown command: ${cmd} — try /help`)
   }
 
@@ -290,14 +307,15 @@ export default function App() {
     return parts.join('\n')
   }
 
-  async function send(content) {
+  async function send(content, opts = {}) {
     const trimmed = content.trim()
     if (!trimmed || streaming) return
-    if (trimmed.startsWith('/')) {
+    if (trimmed.startsWith('/') && !opts.forceArmed) {
       await handleCommand(trimmed)
       return
     }
     const outgoing = attachIdeRun(trimmed)
+    const arm = opts.forceArmed === true || codeArmed || /```python\n/.test(outgoing)
     if (!selectedModel) return
     let convId = activeId
     if (!activeConversation) {
@@ -316,7 +334,7 @@ export default function App() {
     let replyStats = null
     try {
       await api.streamChat(
-        { conversation_id: convId, content: outgoing, model: selectedModel },
+        { conversation_id: convId, content: outgoing, model: selectedModel, tools: arm },
         {
           onDelta: (delta) => {
             partial += delta
@@ -523,7 +541,7 @@ export default function App() {
           </div>
         </header>
         <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} onLoadToIde={loadToIde} onRunCode={runInIde} onDownloadArtifact={downloadArtifact} onOpenArtifact={openArtifact} />
-        <Composer commands={COMMANDS} disabled={!currentModel} streaming={streaming} onSend={send} onStop={stop} />
+        <Composer commands={COMMANDS} disabled={!currentModel} streaming={streaming} onSend={send} onStop={stop} codeArmed={codeArmed} />
       </main>
       {ideOpen && (
         <>

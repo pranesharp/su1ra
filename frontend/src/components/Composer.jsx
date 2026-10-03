@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 
-export default function Composer({ commands = [], disabled, streaming, onSend, onStop }) {
+export default function Composer({ commands = [], disabled, streaming, onSend, onStop, codeArmed }) {
   const [text, setText] = useState('')
   const areaRef = useRef(null)
 
@@ -87,7 +87,10 @@ export default function Composer({ commands = [], disabled, streaming, onSend, o
           </div>
         )}
       </div>
-      <div className="composer-hint">enter to send · shift+enter for newline · /help for commands</div>
+      <div className="composer-hint">
+        {codeArmed ? '// tools armed — run code enabled · ' : ''}
+        enter to send · shift+enter for newline · /help for commands
+      </div>
     </div>
   )
 }

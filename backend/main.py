@@ -157,6 +157,7 @@ class ChatRequest(BaseModel):
     conversation_id: int
     content: str
     model: str = ""
+    tools: bool = False
 
 
 class ConversationCreate(BaseModel):
@@ -332,7 +333,7 @@ async def chat(body: ChatRequest):
     if not conversation["title"]:
         store.update_conversation(body.conversation_id, title=content[:60])
     history = build_history(store.get_messages(body.conversation_id))
-    tools = TOOLS if await ollama.model_supports_tools(model) else None
+    tools = TOOLS if body.tools and await ollama.model_supports_tools(model) else None
     sys_prompt = conversation["system_prompt"]
     if tools:
         directive = (
