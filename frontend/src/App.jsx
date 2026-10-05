@@ -8,10 +8,11 @@ import SettingsModal from './components/SettingsModal.jsx'
 import ModelHub from './components/ModelHub.jsx'
 import IdePane from './components/IdePane.jsx'
 import ArtifactPane from './components/ArtifactPane.jsx'
+import { copyText } from './clip'
 
 const COMMANDS = [
   { cmd: '/help', desc: 'show available commands' },
-  { cmd: '/models', desc: 'list models — /models <name|n> to select, /models pull <name> to download, /models get [query] to browse' },
+  { cmd: '/models', desc: 'list models — /models <name|n> to select, /models pull <name> to download, /models rm <name|n> to delete, /models get [query] to browse' },
   { cmd: '/newchat', desc: 'start a new conversation' },
   { cmd: '/chats', desc: 'list chats — /chats <n|id> to open' },
   { cmd: '/delchat', desc: 'delete a chat — /delchat <n|id>, or /delchat all to wipe all history' },
@@ -63,10 +64,129 @@ export default function App() {
   const widthRef = useRef(460)
   const moveRef = useRef(null)
   const upRef = useRef(null)
+  const [ctxMenu, setCtxMenu] = useState(null)
+  const ctxTimerRef = useRef(null)
 
   useEffect(() => {
     applyAccent(accent)
   }, [accent])
+
+  // Right-button text selection + right-click copy menu. Chromium does not
+  // start selections with the right button, and the desktop shell may not
+  // offer a native context menu — so: right-drag extends a selection from
+  // the press point, and right-clicking selected text shows [ copy ].
+  // Inputs, textareas, the xterm terminal and iframes keep native behavior.
+  useEffect(() => {
+    const skip = (t) => t && t.closest && t.closest('input, textarea, .xterm, iframe')
+    let anchor = null
+    let sx = 0
+    let sy = 0
+    let moved = false
+    let suppressNext = false
+
+    function caretAt(x, y) {
+      try {
+        const r = document.caretRangeFromPoint && document.caretRangeFromPoint(x, y)
+        return r ? { node: r.startContainer, offset: r.startOffset } : null
+      } catch {
+        return null
+      }
+    }
+
+    function extendSelection(x, y) {
+      const cur = caretAt(x, y)
+      if (!anchor || !cur) return
+      const sel = window.getSelection()
+      if (!sel) return
+      try {
+        const range = document.createRange()
+        range.setStart(anchor.node, anchor.offset)
+        range.setEnd(cur.node, cur.offset)
+        if (range.collapsed) {
+          range.setStart(cur.node, cur.offset)
+          range.setEnd(anchor.node, anchor.offset)
+        }
+        sel.removeAllRanges()
+        sel.addRange(range)
+      } catch { /* anchor node detached mid-drag */ }
+    }
+
+    function openMenu(x, y) {
+      if (ctxTimerRef.current) clearTimeout(ctxTimerRef.current)
+      setCtxMenu({
+        x: Math.min(x, window.innerWidth - 150),
+        y: Math.min(y, window.innerHeight - 60),
+        done: null,
+      })
+    }
+
+    function onDown(e) {
+      if (e.button !== 2 || skip(e.target)) {
+        if (e.button === 0 && !e.target.closest('.ctx-menu')) setCtxMenu(null)
+        return
+      }
+      sx = e.clientX
+      sy = e.clientY
+      moved = false
+      anchor = caretAt(sx, sy)
+    }
+
+    function onMove(e) {
+      if (!(e.buttons & 2) || !anchor) return
+      if (Math.hypot(e.clientX - sx, e.clientY - sy) < 4) return
+      moved = true
+      extendSelection(e.clientX, e.clientY)
+    }
+
+    function onUp(e) {
+      if (e.button === 2 && moved) suppressNext = true
+      anchor = e.button === 2 ? null : anchor
+    }
+
+    function onCtx(e) {
+      if (skip(e.target)) return // native menu for fields / terminal
+      const text = window.getSelection ? String(window.getSelection()) : ''
+      if (suppressNext) {
+        suppressNext = false
+        e.preventDefault()
+        e.stopPropagation()
+        if (text) openMenu(e.clientX, e.clientY)
+        return
+      }
+      if (text) {
+        e.preventDefault()
+        e.stopPropagation()
+        openMenu(e.clientX, e.clientY)
+      }
+      // no selection: leave the native menu alone
+    }
+
+    function onKey(e) {
+      if (e.key === 'Escape') setCtxMenu(null)
+    }
+
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    document.addEventListener('contextmenu', onCtx, true)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.removeEventListener('contextmenu', onCtx, true)
+      document.removeEventListener('keydown', onKey)
+      if (ctxTimerRef.current) clearTimeout(ctxTimerRef.current)
+    }
+  }, [])
+
+  async function copySelection() {
+    const text = window.getSelection ? String(window.getSelection()) : ''
+    const ok = await copyText(text)
+    setCtxMenu((m) => (m ? { ...m, done: ok } : m))
+    if (ctxTimerRef.current) clearTimeout(ctxTimerRef.current)
+    ctxTimerRef.current = setTimeout(() => setCtxMenu(null), 900)
+  }
 
   useEffect(() => {
     async function boot() {
@@ -229,8 +349,36 @@ export default function App() {
       if (!arg) {
         const lines = models.map((m, i) => `${String(i + 1).padStart(2)}. ${m.name.padEnd(24)} ${sizeLabel(m.size)}`)
         pushSystem(
-          `${echo}\n\n${lines.join('\n')}\n\n// select with: /models <name or number>`,
+          `${echo}\n\n${lines.join('\n')}\n\n// select with: /models <name or number>   // delete with: /models rm <name or number>`,
         )
+        return
+      }
+      if (arg === 'rm' || arg.startsWith('rm ')) {
+        const target = arg.slice(2).trim()
+        if (!target) {
+          pushSystem(`${echo}\n\n// usage: /models rm <name or number> — e.g. /models rm 2`)
+          return
+        }
+        let name = target
+        if (/^\d+$/.test(target)) {
+          const picked = models[Number(target) - 1]
+          if (!picked) {
+            pushSystem(`${echo}\n\n// no model #${target} — try /models`)
+            return
+          }
+          name = picked.name
+        } else {
+          const exact = models.find((m) => m.name === target)
+          name = exact ? exact.name : target
+        }
+        try {
+          await api.deleteModel(name)
+          const modelsRes = await api.getModels()
+          setModels(modelsRes.models)
+          pushSystem(`${echo}\n\n// deleted ${name}`)
+        } catch (err) {
+          pushSystem(`${echo}\n\n// delete failed: ${err.message}`)
+        }
         return
       }
       const byIndex = /^\d+$/.test(arg) ? models[Number(arg) - 1] : null
@@ -539,9 +687,9 @@ export default function App() {
     }
   }
 
-  async function downloadArtifact(code) {
+  async function downloadArtifact(code, css, js) {
     try {
-      const res = await api.downloadArtifact(code)
+      const res = await api.downloadArtifact(code, undefined, { css: css || undefined, js: js || undefined })
       pushSystem(`// artifact saved to ${res.path}`)
     } catch (err) {
       pushSystem(`// download failed: ${err.message}`)
@@ -589,13 +737,34 @@ export default function App() {
   }
 
   function startResize(e) {
+    if (e.button !== 0) return
     e.preventDefault()
+    // Pointer capture keeps move/up events flowing to the handle even when
+    // the cursor crosses the artifact iframe (whose document would otherwise
+    // swallow them, leaving a stuck drag that follows the mouse forever).
+    const handle = e.currentTarget
+    try {
+      handle.setPointerCapture(e.pointerId)
+    } catch { /* older engines: fall back to window listeners */ }
+    let ended = false
     const onMove = (ev) => {
+      if (ended) return
+      // Belt-and-suspenders: if no button is held, this is a stale drag —
+      // end it instead of chasing the mouse.
+      if (ev.buttons !== undefined && ev.buttons !== 0 && (ev.buttons & 1) === 0) {
+        onUp()
+        return
+      }
       const next = Math.min(1200, Math.max(280, window.innerWidth - ev.clientX))
       widthRef.current = next
       setIdeWidth(next)
     }
     const onUp = () => {
+      if (ended) return
+      ended = true
+      handle.removeEventListener('pointermove', onMove)
+      handle.removeEventListener('pointerup', onUp)
+      handle.removeEventListener('pointercancel', onUp)
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
       moveRef.current = null
@@ -604,6 +773,9 @@ export default function App() {
     }
     moveRef.current = onMove
     upRef.current = onUp
+    handle.addEventListener('pointermove', onMove)
+    handle.addEventListener('pointerup', onUp)
+    handle.addEventListener('pointercancel', onUp)
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
   }
@@ -700,6 +872,13 @@ export default function App() {
           onModelsChanged={() => api.getModels().then((r) => setModels(r.models))}
           onClose={() => setModelHubOpen(false)}
         />
+      )}
+      {ctxMenu && (
+        <div className="ctx-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }}>
+          <button className="ctx-copy" onClick={copySelection}>
+            {ctxMenu.done === true ? '[ copied ]' : ctxMenu.done === false ? '[ copy failed ]' : '[ copy ]'}
+          </button>
+        </div>
       )}
     </div>
   )

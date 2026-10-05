@@ -5,6 +5,7 @@ import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
 import OllamaSetup from './OllamaSetup'
+import { copyText } from '../clip'
 
 function displayizeSingleLine(seg) {
   return seg
@@ -86,28 +87,35 @@ function lastHtmlBlock(text) {
   return blocks.length ? blocks[blocks.length - 1][1].replace(/\n$/, '') : null
 }
 
-async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text)
-  } catch {
-    const ta = document.createElement('textarea')
-    ta.value = text
-    document.body.appendChild(ta)
-    ta.select()
-    document.execCommand('copy')
-    ta.remove()
+function lastCodeBlock(text, lang) {
+  const blocks = [...text.matchAll(new RegExp('```' + lang + '\\n([\\s\\S]*?)(```|$)', 'gi'))]
+  return blocks.length ? blocks[blocks.length - 1][1].replace(/\n$/, '') : null
+}
+
+// Single-doc preview: sibling css/js blocks are inlined so the sandboxed
+// iframe renders styled. Downloads keep them as separate project files.
+function previewDoc(html, css, js) {
+  let doc = html
+  if (css && !/<style[\s>]/i.test(doc)) {
+    const tag = `<style>\n${css}\n</style>`
+    doc = /<\/head\s*>/i.test(doc) ? doc.replace(/<\/head\s*>/i, `${tag}\n</head>`) : tag + '\n' + doc
   }
+  if (js && !/<script[\s>]/i.test(doc)) {
+    const tag = `<script>\n${js}\n</script>`
+    doc = /<\/body\s*>/i.test(doc) ? doc.replace(/<\/body\s*>/i, `${tag}\n</body>`) : doc + '\n' + tag
+  }
+  return doc
 }
 
 function Linkified({ text }) {
-  const [copied, setCopied] = useState(false)
-  const parts = text.split(/(https?:\/\/[^\s)]+)/g)
+  const [mark, setMark] = useState(null)
 
   async function copyAll() {
-    await copyText(text)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1200)
+    const ok = await copyText(text)
+    setMark(ok ? 'copied' : 'failed')
+    setTimeout(() => setMark(null), 1500)
   }
+  const parts = text.split(/(https?:\/\/[^\s)]+)/g)
 
   return (
     <div className="sys-out-wrap">
@@ -123,16 +131,22 @@ function Linkified({ text }) {
         )}
       </pre>
       <button className="sys-copy" onClick={copyAll}>
-        {copied ? '[ copied ]' : '[ copy ]'}
+        {mark === 'copied' ? '[ copied ]' : mark === 'failed' ? '[ copy failed ]' : '[ copy ]'}
       </button>
     </div>
   )
 }
 
 function UserMsg({ m, streaming, onResendFrom }) {
-  const [copied, setCopied] = useState(false)
+  const [mark, setMark] = useState(null)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
+
+  async function doCopy() {
+    const ok = await copyText(m.content)
+    setMark(ok ? 'copied' : 'failed')
+    setTimeout(() => setMark(null), 1500)
+  }
 
   if (editing) {
     return (
@@ -170,8 +184,8 @@ function UserMsg({ m, streaming, onResendFrom }) {
       <div className="user-text">{m.content}</div>
       {!streaming && (
         <span className="user-actions">
-          <button onClick={async () => { await copyText(m.content); setCopied(true); setTimeout(() => setCopied(false), 1200) }}>
-            {copied ? '[ copied ]' : '[ copy ]'}
+          <button onClick={doCopy}>
+            {mark === 'copied' ? '[ copied ]' : mark === 'failed' ? '[ copy failed ]' : '[ copy ]'}
           </button>
           <button onClick={() => { setDraft(m.content); setEditing(true) }}>[ edit ]</button>
           <button onClick={() => onResendFrom?.(m)}>[ redo ]</button>
@@ -203,6 +217,36 @@ export function splitThinking(content) {
   return parts
 }
 
+function CodeBlock({ text, lang, className, children, props, onRunCode }) {
+  const [mark, setMark] = useState(null)
+
+  async function doCopy() {
+    const ok = await copyText(text)
+    setMark(ok ? 'copied' : 'failed')
+    setTimeout(() => setMark(null), 1500)
+  }
+
+  return (
+    <div className="code-block">
+      <div className="code-head">
+        <span className="code-lang">{lang || 'text'}</span>
+        <span style={{ flex: 1 }} />
+        <button className="code-copy" onClick={doCopy}>
+          {mark === 'copied' ? '[ copied ]' : mark === 'failed' ? '[ copy failed ]' : '[ copy ]'}
+        </button>
+        {lang === 'python' && (
+          <button className="code-run" onClick={() => onRunCode && onRunCode(text)}>
+            [ run code ]
+          </button>
+        )}
+      </div>
+      <pre>
+        <code className={className} {...props}>{children}</code>
+      </pre>
+    </div>
+  )
+}
+
 function AssistantContent({ content, toolCalls, streaming, onLoadToIde, onRunCode }) {
   if (!content && !(toolCalls || []).length) return streaming ? <span className="cursor" /> : null
   const parts = splitThinking(content)
@@ -223,19 +267,9 @@ function AssistantContent({ content, toolCalls, streaming, onLoadToIde, onRunCod
                   const isBlock = className?.includes('language-') || text.includes('\n')
                   if (!isBlock) return <code className={className} {...props}>{children}</code>
                   return (
-                    <div className="code-block">
-                      <div className="code-head">
-                        <span className="code-lang">{lang || 'text'}</span>
-                        {lang === 'python' && (
-                          <button className="code-run" onClick={() => onRunCode && onRunCode(text)}>
-                            [ run code ]
-                          </button>
-                        )}
-                      </div>
-                      <pre>
-                        <code className={className} {...props}>{children}</code>
-                      </pre>
-                    </div>
+                    <CodeBlock text={text} lang={lang} className={className} props={props} onRunCode={onRunCode}>
+                      {children}
+                    </CodeBlock>
                   )
                 },
               }}
@@ -307,15 +341,18 @@ export default function ChatView({ messages, status, streaming, showStats, onLoa
                 <AssistantContent content={m.content} toolCalls={m.tool_calls} streaming={streaming} onLoadToIde={onLoadToIde} onRunCode={onRunCode} />
                 {(() => {
                   if (!onDownloadArtifact || streaming) return null
-                  const block = lastHtmlBlock(m.content || '')
-                  if (!block) return null
+                  const html = lastHtmlBlock(m.content || '')
+                  if (!html) return null
+                  const css = lastCodeBlock(m.content || '', 'css')
+                  const js = lastCodeBlock(m.content || '', 'js') || lastCodeBlock(m.content || '', 'javascript')
+                  const multi = Boolean(css || js)
                   return (
                     <span className="artifact-actions">
-                      <button className="code-run artifact-dl" onClick={() => onOpenArtifact(block)}>
+                      <button className="code-run artifact-dl" onClick={() => onOpenArtifact(previewDoc(html, css, js))}>
                         [ open artifact ]
                       </button>
-                      <button className="code-run artifact-dl" onClick={() => onDownloadArtifact(block)}>
-                        [ download artifact ]
+                      <button className="code-run artifact-dl" onClick={() => onDownloadArtifact(html, css, js)}>
+                        {multi ? '[ download project ]' : '[ download artifact ]'}
                       </button>
                     </span>
                   )

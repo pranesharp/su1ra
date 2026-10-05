@@ -25,7 +25,7 @@ React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
   | Command | What it does |
   |---|---|
   | `/help` | list all commands |
-  | `/models` | list models; `/models <name|n>` to select |
+  | `/models` | list models; `/models <name|n>` to select, `/models pull <name>` to download, `/models rm <name|n>` to delete |
   | `/newchat` | start a new conversation |
   | `/chats` | list chats; `/chats <n|id>` to open |
   | `/delchat` | delete a chat |

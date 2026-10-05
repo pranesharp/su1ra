@@ -63,9 +63,8 @@ ERROR_HTML = """<!doctype html>
 </style></head>
 <body>
   <div>
-    <div style="color:#e04a6e">&gt; could not start the ollama server</div>
-    <p style="color:#8b8b92">check that ollama is installed, or start it manually in a terminal:</p>
-    <p><code>ollama serve</code></p>
+    <div style="color:#e04a6e">&gt; could not start the su1ra backend</div>
+    <p style="color:#8b8b92">reinstall, or run desktop.py from a terminal to see the error</p>
   </div>
 </body>
 </html>"""
@@ -151,6 +150,8 @@ def ensure_ollama(window):
     if data.get("ok"):
         print("[su1ra] ollama is up", flush=True)
         set_status(window, "ollama is up")
+        global ollama_started_by_us
+        ollama_started_by_us = bool(data.get("started"))
         return True
     print(f"[su1ra] ollama failed: {data.get('error')}", flush=True)
     return False
@@ -177,14 +178,59 @@ window = webview.create_window(
 
 
 def boot():
-    ok = wait_for_backend(window) and ensure_ollama(window)
-    if ok:
-        print("[su1ra] window -> app", flush=True)
-        window.load_url(APP_URL + "/")
-    else:
-        print("[su1ra] window -> error screen", flush=True)
+    if not wait_for_backend(window):
+        print("[su1ra] backend never became ready -> error screen", flush=True)
         window.load_html(ERROR_HTML)
+        return
+    if ensure_ollama(window):
+        print("[su1ra] window -> app", flush=True)
+    else:
+        # Ollama missing/down is NOT fatal: the home screen's OllamaSetup
+        # callout offers [ start ollama ] / [ install ollama ] in-app.
+        print("[su1ra] window -> app (ollama pending, in-app setup will offer install)", flush=True)
+    window.load_url(APP_URL + "/")
 
 
+ollama_started_by_us = False
+
+
+def _set_window_icon():
+    """Windows taskbar/title icon. pywebview never sets one (WinForms shows
+    a generic glyph), so push su1ra.ico onto the native window by title."""
+    if os.name != "nt":
+        return
+    try:
+        base = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else PROJECT_ROOT
+        ico = base / "su1ra.ico"
+        if not ico.exists():
+            return
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        hicon = user32.LoadImageW(None, str(ico), 1, 0, 0, 0x10)
+        if not hicon:
+            return
+        for _ in range(300):
+            hwnd = user32.FindWindowW(None, "Su1ra")
+            if hwnd:
+                user32.SendMessageW(hwnd, 0x80, 0, hicon)
+                user32.SendMessageW(hwnd, 0x80, 1, hicon)
+                print("[su1ra] window icon set", flush=True)
+                return
+            time.sleep(0.2)
+    except Exception as exc:
+        print(f"[su1ra] window icon skipped: {exc}", flush=True)
+
+
+threading.Thread(target=_set_window_icon, daemon=True).start()
 threading.Thread(target=boot, daemon=True).start()
 webview.start(debug=os.environ.get("SU1RA_DEBUG") == "1")
+
+# Window closed: stop the ollama server only if this session spawned it.
+# A server the user was already running is left untouched.
+if ollama_started_by_us:
+    print("[su1ra] stopping self-spawned ollama…", flush=True)
+    try:
+        httpx.post(f"{APP_URL}/api/ollama/stop", timeout=10.0)
+    except Exception as exc:
+        print(f"[su1ra] ollama stop failed: {exc}", flush=True)

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { pullModel, cancelPull } from '../api'
+import { pullModel, cancelPull, deleteModel } from '../api'
 
 const FAMILIES = [
   {
@@ -71,6 +71,10 @@ const SINGLES = [
 export default function ModelHub({ models, onModelsChanged, onClose }) {
   const [pullName, setPullName] = useState('')
   const [pull, setPull] = useState(null)
+  const [confirmRm, setConfirmRm] = useState(null)
+  const [rmBusy, setRmBusy] = useState(null)
+  const [rmErr, setRmErr] = useState('')
+  const confirmTimer = useRef(null)
   const [openFams, setOpenFams] = useState(() => new Set())
   const [disk, setDisk] = useState(0)
   const pullCtrl = useRef(null)
@@ -84,7 +88,10 @@ export default function ModelHub({ models, onModelsChanged, onClose }) {
       .then((r) => r.json())
       .then((d) => setDisk(d.free || 0))
       .catch(() => {})
-    return () => window.removeEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      if (confirmTimer.current) clearTimeout(confirmTimer.current)
+    }
   }, [onClose])
 
   const installed = new Set(models.map((m) => m.name))
@@ -122,6 +129,41 @@ export default function ModelHub({ models, onModelsChanged, onClose }) {
     setPull(null)
   }
 
+  async function removeModel(tag) {
+    if (rmBusy) return
+    if (confirmRm !== tag) {
+      setConfirmRm(tag)
+      setRmErr('')
+      if (confirmTimer.current) clearTimeout(confirmTimer.current)
+      confirmTimer.current = setTimeout(() => setConfirmRm(null), 4000)
+      return
+    }
+    if (confirmTimer.current) clearTimeout(confirmTimer.current)
+    setConfirmRm(null)
+    setRmBusy(tag)
+    setRmErr('')
+    try {
+      await deleteModel(tag)
+      onModelsChanged?.()
+    } catch (err) {
+      setRmErr(err.message)
+    } finally {
+      setRmBusy(null)
+    }
+  }
+
+  function rmButton(tag) {
+    return (
+      <button
+        className="btn-ghost"
+        disabled={rmBusy !== null}
+        onClick={() => removeModel(tag)}
+      >
+        {rmBusy === tag ? '[ … ]' : confirmRm === tag ? '[ sure? ]' : '[ rm ]'}
+      </button>
+    )
+  }
+
   function toggleFam(fam) {
     setOpenFams((prev) => {
       const next = new Set(prev)
@@ -152,13 +194,18 @@ export default function ModelHub({ models, onModelsChanged, onClose }) {
           <div className="pull-bar hub-bar">
             <div className="pull-fill" style={{ width: `${pull.pct ?? 0}%` }} />
           </div>
+        ) : isInstalled ? (
+          <span className="hub-actions">
+            <span className="hub-specs">[ installed ]</span>
+            {rmButton(fullTag)}
+          </span>
         ) : (
           <button
             className="btn-ghost"
-            disabled={isInstalled || (pullActive && pull.name !== fullTag)}
+            disabled={pullActive && pull.name !== fullTag}
             onClick={() => { setPullName(fullTag); startPull(fullTag) }}
           >
-            {isInstalled ? '[ installed ]' : '[ pull ]'}
+            [ pull ]
           </button>
         )}
       </div>
@@ -204,6 +251,7 @@ export default function ModelHub({ models, onModelsChanged, onClose }) {
             </div>
           )}
         </div>
+        {rmErr && <p className="pull-err">// delete failed: {rmErr}</p>}
         <div className="hub-list">
           {SINGLES.map(([tag, specs]) => (
             <div key={tag} className={`hub-row${pullActive && pull.name === tag ? ' pulling' : ''}`}>
@@ -215,13 +263,18 @@ export default function ModelHub({ models, onModelsChanged, onClose }) {
                 <div className="pull-bar hub-bar">
                   <div className="pull-fill" style={{ width: `${pull.pct ?? 0}%` }} />
                 </div>
+              ) : installed.has(tag) ? (
+                <span className="hub-actions">
+                  <span className="hub-specs">[ installed ]</span>
+                  {rmButton(tag)}
+                </span>
               ) : (
                 <button
                   className="btn-ghost"
-                  disabled={installed.has(tag) || pullActive}
+                  disabled={pullActive}
                   onClick={() => { setPullName(tag); startPull(tag) }}
                 >
-                  {installed.has(tag) ? '[ installed ]' : '[ pull ]'}
+                  [ pull ]
                 </button>
               )}
             </div>

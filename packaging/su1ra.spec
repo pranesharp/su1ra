@@ -9,7 +9,7 @@ a = Analysis(
     [str(ROOT / "desktop.py")],
     pathex=[str(ROOT / "backend")],
     binaries=[],
-    datas=[(str(ROOT / "frontend" / "dist"), "frontend/dist"), (str(ROOT / "su1ra.svg"), ".")],
+    datas=[(str(ROOT / "frontend" / "dist"), "frontend/dist"), (str(ROOT / "su1ra.svg"), "."), (str(ROOT / "su1ra.ico"), ".")],
     hiddenimports=[
         "main",
         "store",
@@ -43,5 +43,6 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    icon=str(ROOT / "su1ra.ico"),
 )
 coll = COLLECT(exe, a.binaries, a.zipfiles, a.datas, name="Su1ra")

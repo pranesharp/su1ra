@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import json
 import os
 import shutil
@@ -20,6 +21,7 @@ def base_url():
 
 _capabilities_cache = {}
 _ctx_cache = {}
+_spawned_proc = None
 
 
 async def model_supports_tools(model):
@@ -118,7 +120,8 @@ async def ensure_running():
     binary = find_binary()
     if not binary:
         return {"ok": False, "error": "ollama binary not found — install ollama or add it to PATH"}
-    subprocess.Popen(
+    global _spawned_proc
+    _spawned_proc = subprocess.Popen(
         [binary, "serve"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -130,6 +133,37 @@ async def ensure_running():
             return {"ok": True, "started": True, "url": base}
         await asyncio.sleep(0.5)
     return {"ok": False, "error": f"ollama did not come up at {base} within 60s"}
+
+
+def stop_spawned():
+    """Stop the ollama server, but ONLY if this backend spawned it.
+
+    Never touches a server the user was already running. Returns True
+    when a spawned process was actually stopped.
+    """
+    global _spawned_proc
+    proc, _spawned_proc = _spawned_proc, None
+    if proc is None or proc.poll() is not None:
+        return False
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    return True
+
+
+def _stop_spawned_quiet():
+    try:
+        stop_spawned()
+    except Exception:
+        pass
+
+
+atexit.register(_stop_spawned_quiet)
 
 
 async def list_models():

@@ -12,36 +12,47 @@ DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=output
 OutputBaseFilename=Su1ra-setup-x64
+SetupIconFile=..\su1ra.ico
 Compression=lzma2/max
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
+ChangesEnvironment=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "ollamaserver"; Description: "Download the Ollama server (command-line engine, no bundled chat app - Su1ra is the GUI)"; GroupDescription: "Requirements:"; Flags: checkedonce
-Name: "ollamaapp"; Description: "...or install the full Ollama desktop app instead (adds its own chat GUI and tray icon)"; GroupDescription: "Requirements:"; Flags: unchecked
 Name: "openmodellib"; Description: "Open the Ollama model library in your browser after setup (browse what to pull with /models get in-app)"; GroupDescription: "Requirements:"; Flags: unchecked
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
 Source: "..\packaging\dist\Su1ra\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
-Source: "https://github.com/ollama/ollama/releases/latest/download/ollama-windows-amd64.zip"; DestDir: "{tmp}\ollama.zip"; Flags: download dontcopy; Tasks: ollamaserver
-Source: "https://ollama.com/download/OllamaSetup.exe"; DestDir: "{tmp}"; Flags: download dontcopy; Tasks: ollamaapp
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\su1ra.exe"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\su1ra.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "powershell"; Parameters: "-NoProfile -WindowStyle Hidden Expand-Archive -Force '{tmp}\ollama.zip' '{app}\ollama'"; StatusMsg: "Installing the Ollama server..."; Tasks: ollamaserver
-Filename: "{tmp}\OllamaSetup.exe"; StatusMsg: "Installing Ollama..."; Tasks: ollamaapp
 Filename: "https://ollama.com/search"; Flags: shellexec runasoriginaluser postinstall; Tasks: openmodellib
 Filename: "{app}\su1ra.exe"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+
+[Registry]
+Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}\ollama"; Check: NeedsAddOllamaPath
+
+[Code]
+function NeedsAddOllamaPath(): Boolean;
+var
+  OrigPath, Needle: string;
+begin
+  Needle := ';' + Lowercase(ExpandConstant('{app}\ollama')) + ';';
+  if RegQueryStringValue(HKCU, 'Environment', 'Path', OrigPath) then
+    Result := Pos(Needle, ';' + Lowercase(OrigPath) + ';') = 0
+  else
+    Result := True;
+end;
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"

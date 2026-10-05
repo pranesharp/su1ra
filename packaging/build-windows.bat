@@ -2,7 +2,9 @@
 REM Run from the repo root on Windows, inside the venv:
 REM   .venv\Scripts\activate
 REM   packaging\build-windows.bat
-REM Requires Inno Setup 6.3+ (the Ollama download task uses the download flag).
+REM Requires Inno Setup 6.3+.
+REM NOTE: ISCC may live per-user (winget) at %LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe
+REM instead of %ProgramFiles(x86)% — adjust the path below if needed.
 setlocal
 cd /d "%~dp0.."
 

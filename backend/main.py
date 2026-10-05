@@ -14,6 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
+import httpx
+
 import ollama
 import ollama_setup
 import puller
@@ -236,6 +238,12 @@ async def ollama_start():
     return await ollama.ensure_running()
 
 
+@app.post("/api/ollama/stop")
+async def ollama_stop():
+    """Stop the server only if Su1ra spawned it (never a user's own server)."""
+    return {"ok": True, "stopped": ollama.stop_spawned()}
+
+
 @app.post("/api/ollama/install")
 async def ollama_install():
     async def stream():
@@ -307,6 +315,23 @@ async def pull_model(body: PullRequest):
 async def cancel_pull(body: PullRequest):
     puller.cancel(body.model.strip())
     return {"ok": True}
+
+
+@app.delete("/api/models/{name:path}")
+async def delete_model(name: str):
+    name = name.strip()
+    if not name:
+        raise HTTPException(422, "model name required")
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.request("DELETE", f"{ollama.base_url()}/api/delete", json={"model": name})
+    except Exception as exc:
+        raise HTTPException(502, f"cannot reach ollama server: {exc}")
+    if resp.status_code == 404:
+        raise HTTPException(404, f'model "{name}" not found')
+    if resp.status_code != 200:
+        raise HTTPException(502, f"ollama refused: {resp.text[:200]}")
+    return {"ok": True, "deleted": name}
 
 
 @app.get("/api/settings")
@@ -775,11 +800,25 @@ async def run_input(body: RunInput):
 class DownloadBody(BaseModel):
     content: str
     filename: str | None = None
+    css: str | None = None
+    js: str | None = None
+
+
+def _inject_tag(html: str, tag: str, anchor: str, skip_pattern: str) -> str:
+    """Insert tag before anchor (</head> or </body>) unless skip_pattern matches."""
+    if re.search(skip_pattern, html, re.IGNORECASE):
+        return html
+    if re.search(anchor, html, re.IGNORECASE):
+        return re.sub(anchor, tag + r"\g<0>", html, count=1, flags=re.IGNORECASE)
+    return html + "\n" + tag if anchor == r"</body\s*>" else tag + "\n" + html
 
 
 @app.post("/api/download")
 async def download_artifact(body: DownloadBody):
-    if len(body.content) > 5_000_000:
+    css = (body.css or "").strip()
+    js = (body.js or "").strip()
+    total = len(body.content) + len(css) + len(js)
+    if total > 5_000_000:
         raise HTTPException(413, "Artifact too large (5MB limit)")
     name = body.filename or "artifact"
     name = re.sub(r"[^A-Za-z0-9_-]", "-", name).strip("-") or "artifact"
@@ -789,16 +828,46 @@ async def download_artifact(body: DownloadBody):
         target_dir = downloads
     except OSError:
         target_dir = Path.home()
-    final = None
+    if not css and not js:
+        final = None
+        for i in range(1, 1000):
+            candidate = target_dir / f"su1ra-{name}{'' if i == 1 else f'-{i}'}.html"
+            if not candidate.exists():
+                final = candidate
+                break
+        if final is None:
+            raise HTTPException(409, "Could not pick a file name")
+        final.write_text(body.content, encoding="utf-8")
+        return {"ok": True, "path": str(final)}
+    # Project folder: index.html + style.css + script.js, wired together.
+    project = None
     for i in range(1, 1000):
-        candidate = target_dir / f"su1ra-{name}{'' if i == 1 else f'-{i}'}.html"
+        candidate = target_dir / f"su1ra-{name}{'' if i == 1 else f'-{i}'}"
         if not candidate.exists():
-            final = candidate
+            project = candidate
             break
-    if final is None:
-        raise HTTPException(409, "Could not pick a file name")
-    final.write_text(body.content, encoding="utf-8")
-    return {"ok": True, "path": str(final)}
+    if project is None:
+        raise HTTPException(409, "Could not pick a folder name")
+    project.mkdir()
+    html = body.content
+    if css:
+        html = _inject_tag(
+            html,
+            '<link rel="stylesheet" href="./style.css">',
+            r"</head\s*>",
+            r"<link[^>]*stylesheet",
+        )
+        (project / "style.css").write_text(body.css.strip() + "\n", encoding="utf-8")
+    if js:
+        html = _inject_tag(
+            html,
+            '<script src="./script.js"></script>',
+            r"</body\s*>",
+            r"<script[^>]*src=",
+        )
+        (project / "script.js").write_text(body.js.strip() + "\n", encoding="utf-8")
+    (project / "index.html").write_text(html, encoding="utf-8")
+    return {"ok": True, "path": str(project)}
 
 
 @app.get("/{full_path:path}")

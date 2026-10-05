@@ -806,11 +806,24 @@ button {
 /* ---------- IDE pane ---------- */
 
 .ide-resize {
-  width: 4px;
+  position: relative;
+  width: 6px;
   height: 100%;
   cursor: col-resize;
   background: transparent;
   flex-shrink: 0;
+  touch-action: none;
+  box-shadow: inset 1px 0 0 var(--border);
+}
+
+/* Invisible wider grab area (visuals stay slim). */
+.ide-resize::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -5px;
+  right: -5px;
 }
 
 .ide-resize:hover {
@@ -1001,6 +1014,62 @@ button {
   border-color: var(--accent);
 }
 
+.code-copy {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.12s ease;
+}
+
+.code-copy:hover {
+  color: var(--accent-bright);
+}
+
+/* ---------- Right-click copy menu ---------- */
+
+.ctx-menu {
+  position: fixed;
+  z-index: 2000;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 4px 6px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55);
+}
+
+.ctx-copy {
+  background: none;
+  border: none;
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.ctx-copy:hover {
+  color: var(--accent-bright);
+}
+
+/* Message text stays selectable (labels/chrome keep user-select: none). */
+
+.md,
+.md pre,
+.md pre code,
+.code-block pre,
+.tool-code pre,
+.tool-out,
+.user-text,
+.think-text,
+.sys-out {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 .ide-out {
   user-select: text;
   -webkit-user-select: text;
@@ -1164,6 +1233,11 @@ button {
 }
 .hub-bar {
   width: 160px;
+}
+.hub-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 .hub-hint {
   font-size: 11px;

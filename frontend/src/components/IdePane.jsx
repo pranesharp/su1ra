@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import * as api from '../api'
+import { copyText } from '../clip'
 
 function stripAnsi(text) {
   return text
@@ -58,6 +59,7 @@ export default function IdePane({ width, code, onCodeChange, onClose, onResizeSt
   const [inputText, setInputText] = useState('')
   const [termActive, setTermActive] = useState(false)
   const [plainOut, setPlainOut] = useState('')
+  const [copyMark, setCopyMark] = useState(null)
   const controllerRef = useRef(null)
   const areaRef = useRef(null)
   const gutterRef = useRef(null)
@@ -254,27 +256,12 @@ export default function IdePane({ width, code, onCodeChange, onClose, onResizeSt
     })
   }
 
-  function copyOutput() {
+  async function copyOutput() {
     const text = termActive ? plainOut : lines.map((l) => l.text).join('\n')
     if (!text) return
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).catch(() => fallbackCopy(text))
-    } else {
-      fallbackCopy(text)
-    }
-  }
-
-  function fallbackCopy(text) {
-    const el = document.createElement('textarea')
-    el.value = text
-    el.style.position = 'fixed'
-    el.style.opacity = '0'
-    document.body.appendChild(el)
-    el.select()
-    try {
-      document.execCommand('copy')
-    } catch {}
-    document.body.removeChild(el)
+    const ok = await copyText(text)
+    setCopyMark(ok ? 'copied' : 'failed')
+    setTimeout(() => setCopyMark(null), 1500)
   }
 
   function handleKeyDown(e) {
@@ -306,7 +293,7 @@ export default function IdePane({ width, code, onCodeChange, onClose, onResizeSt
         <span className="ide-title">ide</span>
         <span style={{ flex: 1 }} />
         <button className="term-btn" onClick={copyOutput}>
-          copy
+          {copyMark === 'copied' ? 'copied' : copyMark === 'failed' ? 'copy failed' : 'copy'}
         </button>
         <button className="term-btn" onClick={onSendToChat}>
           send to chat
