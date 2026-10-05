@@ -4,6 +4,8 @@ THE BEST harness for your LOCAL AI agentic work - simple UI for simple setup and
 A local, terminal style desktop gui app for [Ollama][Backend]( : https://ollama.com) models. Removing the hassle of setting up agentic and tool calls externally for Ollama.
 Everything runs on your machine, your models, your data, no cloud, no accounts.
 
+I'd appreciate feedback on my page : https://vault-pranesh.pages.dev/
+
 <img width="740" height="542" alt="screenshot_20261004_044925" src="https://github.com/user-attachments/assets/b5179e58-3779-4a7a-814a-d3735475c3e6" />
 
 
@@ -42,19 +44,24 @@ React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
 - [Ollama](https://ollama.com/download) installed (the app detects or starts it for you)
 - At least one tool-capable model, e.g.:
   ```
-  ollama pull qwen2.5-coder:7b
+  #On the bottom of settings section (when typed /settings into the text box) you can easily access models without terminal, but if you still want other models you can use this.
+  ollama pull deepseek-coder:6.7b
+  
+  #Later I'll also implement a way to import a custom model from huggingface - maybe you'd want a "uncensored" kinda model. Till then I guess you can follow tutorials, its pretty simple.
   ```
-*I personally use ornith1.5:9b*
+*MoE(s) USUALLY work well locally.*
+*The least taxing for the best output for MY device (running on an arrow lake no dgpu) was on gemma4 : e4b and e2b*
+*If you can afford it, I'm pretty sure Qwen 3.8 would work the best*  
 
 ## Install
 
-### Windows [ WILL BE RELEASING SOON-STILL IN DEVELOPMENT ]
+### Windows [ NEW RELEASE ]
 
-Download `Su1ra-setup-x64.exe` from releases and run it. The installer offers to fetch the Ollama server (command-line engine only — Su1ra is the GUI and starts/stops it for you); if you already have Ollama installed, uncheck it. A full Ollama desktop app option (its own chat GUI + tray icon) is available as an alternative.
+Download `Su1ra-setup-x64.exe` from releases and run it. The installer fetches the Ollama server (CLI) + (Su1ra GUI)
 
-### Linux
+### Linux (Working well on arch for me)
 
-Git pull (Linux users, you know the drill):
+Same old Git clone:
 
 ```bash
 git clone https://github.com/<you>/su1ra.git && cd su1ra
