@@ -50,8 +50,11 @@ React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
   #Later I'll also implement a way to import a custom model from huggingface - maybe you'd want a "uncensored" kinda model. Till then I guess you can follow tutorials, its pretty simple.
   ```
 *MoE(s) USUALLY work well locally.*
-*The least taxing for the best output for MY device (running on an arrow lake no dgpu) was on gemma4 : e4b and e2b*
+*The least taxing for the best output for MY device (running on an arrow lake no dgpu) was on gemma4 : e4b and e2b And qwen3.5 4b*
 *If you can afford it, I'm pretty sure Qwen 3.8 would work the best*  
+
+*For a lower spec device I'd suggest you use a separate general tool call and chat model like gemma4 : e4b / e2b, and for coding specifically you could use qwen 3.5 4b (gemma4 can do weaker levels of codes as well, if its a simple code or so, and maybe you could build ON to the same code with qwen.) For lower end hardware, I suggest you turn off thinking for gemma and KEEP THINKING ON FOR QWEN.* 
+
 
 ## Install
 
@@ -61,7 +64,7 @@ Download `Su1ra-setup-x64.exe` from releases and run it. The installer fetches t
 
 ### Linux (Working well on arch for me)
 
-Same old Git clone:
+Just Git clone and the requirements will do :
 
 ```bash
 git clone https://github.com/<you>/su1ra.git && cd su1ra
