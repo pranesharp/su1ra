@@ -6,7 +6,8 @@ Everything runs on your machine, your models, your data, no cloud, no accounts.
 
 I'd appreciate feedback on my page : https://vault-pranesh.pages.dev/
 
-<img width="740" height="542" alt="screenshot_20261004_044925" src="https://github.com/user-attachments/assets/b5179e58-3779-4a7a-814a-d3735475c3e6" />
+<img width="1919" height="1139" alt="Screenshot 2026-10-06 202750" src="https://github.com/user-attachments/assets/bfaad273-f85f-4be6-bdf9-16e24c86584d" />
+
 
 
 ```
@@ -39,6 +40,11 @@ React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
   | `/ide` | toggle the Python IDE pane |
 
 - 10 accent themes, persistent history in SQLite, per-chat system prompt / temperature / context length
+
+
+<img width="1898" height="1129" alt="Screenshot 2026-10-06 202543" src="https://github.com/user-attachments/assets/0cc33661-ba2a-4cdf-bce5-e001c1b52538" />
+
+
 
 ## Requirements
 
