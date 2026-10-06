@@ -67,7 +67,7 @@ Download `Su1ra-setup-x64.exe` from releases and run it. The installer fetches t
 Just Git clone and the requirements will do :
 
 ```bash
-git clone https://github.com/<you>/su1ra.git && cd su1ra
+git clone https://github.com/pranesharp/su1ra.git && cd su1ra
 python -m venv .venv
 .venv/bin/pip install -r backend/requirements.txt
 cd frontend && yarn && yarn build && cd ..
