@@ -21,6 +21,7 @@ const COMMANDS = [
   { cmd: '/eject', desc: 'shut down the ollama server instantly' },
   { cmd: '/connect', desc: 'start / reconnect the ollama server' },
   { cmd: '/stats', desc: 'toggle per-reply performance stats' },
+  { cmd: '/think', desc: 'thinking — /think, /think on|off|auto (this chat, persisted)' },
   { cmd: '/code', desc: 'toggle code mode — the model may run code; /code <msg> arms one message' },
   { cmd: '/ide', desc: 'toggle the python ide pane' },
 ]
@@ -60,7 +61,7 @@ export default function App() {
   const ideRunSeenRef = useRef(null)
   const [runSignal, setRunSignal] = useState(0)
   const idRef = useRef(1000)
-  const chatDefaultsRef = useRef({ system_prompt: '', temperature: 0.7, context_length: 0 })
+  const chatDefaultsRef = useRef({ system_prompt: '', temperature: 0.7, context_length: 0, think: null })
   const widthRef = useRef(460)
   const moveRef = useRef(null)
   const upRef = useRef(null)
@@ -202,6 +203,7 @@ export default function App() {
         system_prompt: settingsRes.default_system_prompt || '',
         temperature: typeof settingsRes.default_temperature === 'number' ? settingsRes.default_temperature : 0.7,
         context_length: settingsRes.default_context_length || 0,
+        think: settingsRes.default_think || null,
       }
       setShowStats(settingsRes.show_stats === true)
       setIdeOpen(settingsRes.ide_open === true)
@@ -494,6 +496,37 @@ export default function App() {
       return
     }
 
+    if (cmd === '/think') {
+      const mode = arg.trim().toLowerCase()
+      const current = activeConversation?.think ?? chatDefaultsRef.current.think ?? null
+      let next = null
+      if (!mode) {
+        next = current === 'off' ? 'on' : 'off'
+      } else if (['on', 'true', '1'].includes(mode)) {
+        next = 'on'
+      } else if (['off', 'false', '0'].includes(mode)) {
+        next = 'off'
+      } else if (['auto', 'default', 'none'].includes(mode)) {
+        next = 'auto'
+      } else {
+        pushSystem(`${echo}\n\n// usage: /think [on|off|auto] — e.g. /think off`)
+        return
+      }
+      const value = next === 'auto' ? null : next
+      if (activeConversation) {
+        const updated = await api.updateConversation(activeConversation.id, { think: value === null ? 'auto' : value })
+        if (updated) {
+          setConversations((prev) => prev.map((c) => (c.id === updated.id ? updated : c)))
+        }
+      } else {
+        chatDefaultsRef.current = { ...chatDefaultsRef.current, think: value }
+        await api.saveSettings({ default_think: value === null ? 'auto' : value })
+      }
+      const label = value === null ? 'auto (model default)' : value
+      pushSystem(`${echo}\n\n// thinking: ${label}${activeConversation ? '' : ' — applies to new chats'}`)
+      return
+    }
+
     if (cmd === '/ide') {
       const next = !ideOpen
       setIdeOpen(next)
@@ -543,6 +576,7 @@ export default function App() {
     const outgoing = attachIdeRun(trimmed)
     const arm = opts.forceArmed === true || codeArmed || /```python\n/.test(outgoing)
     if (!selectedModel) return
+    const think = activeConversation?.think ?? chatDefaultsRef.current.think ?? null
     let convId = activeId
     if (!activeConversation) {
       const conversation = await api.createConversation({ model: selectedModel, ...chatDefaultsRef.current })
@@ -560,7 +594,7 @@ export default function App() {
     let replyStats = null
     try {
       await api.streamChat(
-        { conversation_id: convId, content: outgoing, model: selectedModel, tools: arm },
+        { conversation_id: convId, content: outgoing, model: selectedModel, tools: arm, think },
         {
           onUserId: (dbId) =>
             setMessages((prev) => prev.map((m) => (m.id === userMsg.id ? { ...m, id: dbId } : m))),
@@ -780,7 +814,7 @@ export default function App() {
     window.addEventListener('mouseup', onUp)
   }
 
-  async function saveSettings({ ollamaUrl, systemPrompt, temperature, contextLength, accent: newAccent, sandboxTools: sandboxPref }) {
+  async function saveSettings({ ollamaUrl, systemPrompt, temperature, contextLength, think, accent: newAccent, sandboxTools: sandboxPref }) {
     await api.saveSettings({
       ollama_url: ollamaUrl,
       accent: newAccent,
@@ -788,8 +822,14 @@ export default function App() {
       default_system_prompt: systemPrompt,
       default_temperature: temperature,
       default_context_length: contextLength,
+      ...(think === undefined ? {} : { default_think: think === null ? 'auto' : think }),
     })
-    chatDefaultsRef.current = { system_prompt: systemPrompt, temperature, context_length: contextLength }
+    chatDefaultsRef.current = {
+      system_prompt: systemPrompt,
+      temperature,
+      context_length: contextLength,
+      ...(think === undefined ? {} : { think }),
+    }
     setStatus(await api.getStatus())
     setAccent(newAccent)
     if (activeConversation) {
@@ -797,6 +837,7 @@ export default function App() {
         system_prompt: systemPrompt,
         temperature,
         context_length: contextLength,
+        ...(think === undefined ? {} : { think: think === null ? 'auto' : think }),
       })
       if (updated) {
         setConversations((prev) => prev.map((c) => (c.id === updated.id ? updated : c)))
@@ -806,6 +847,7 @@ export default function App() {
   }
 
   const currentModel = activeConversation?.model || selectedModel
+  const currentThink = activeConversation?.think ?? chatDefaultsRef.current.think ?? null
 
   return (
     <div className="app">
@@ -822,7 +864,7 @@ export default function App() {
           <div className="chat-meta">
             <span className="hash">#</span>
             {activeConversation?.title || 'no chat'}
-            <span className="meta-model"> · model: {currentModel || 'none'}</span>
+            <span className="meta-model"> · model: {currentModel || 'none'} · think: {currentThink || 'auto'}</span>
           </div>
         </header>
         <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} onLoadToIde={loadToIde} onRunCode={runInIde} onDownloadArtifact={downloadArtifact} onOpenArtifact={openArtifact} onOllamaReady={refreshStatus} onResendFrom={resendFrom} />

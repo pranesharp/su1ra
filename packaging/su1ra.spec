@@ -9,7 +9,7 @@ a = Analysis(
     [str(ROOT / "desktop.py")],
     pathex=[str(ROOT / "backend")],
     binaries=[],
-    datas=[(str(ROOT / "frontend" / "dist"), "frontend/dist"), (str(ROOT / "su1ra.svg"), "."), (str(ROOT / "su1ra.ico"), ".")],
+    datas=[(str(ROOT / "frontend" / "dist"), "frontend/dist"), (str(ROOT / "su1ra.svg"), "."), (str(ROOT / "su1ra.ico"), "."), (str(ROOT / "sysp.txt"), ".")],
     hiddenimports=[
         "main",
         "store",

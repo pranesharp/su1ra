@@ -164,6 +164,7 @@ class ChatRequest(BaseModel):
     content: str
     model: str = ""
     tools: bool = False
+    think: bool | str | None = None
 
 
 class ConversationCreate(BaseModel):
@@ -172,6 +173,7 @@ class ConversationCreate(BaseModel):
     system_prompt: str = ""
     temperature: float = 0.7
     context_length: int = 0
+    think: bool | str | None = None
 
 
 class ConversationUpdate(BaseModel):
@@ -180,6 +182,7 @@ class ConversationUpdate(BaseModel):
     system_prompt: str | None = None
     temperature: float | None = None
     context_length: int | None = None
+    think: bool | str | None = None
 
 
 class SettingsUpdate(BaseModel):
@@ -192,6 +195,7 @@ class SettingsUpdate(BaseModel):
     default_system_prompt: str | None = None
     default_temperature: float | None = None
     default_context_length: int | None = None
+    default_think: bool | str | None = None
 
 
 class RunRequest(BaseModel):
@@ -346,6 +350,7 @@ async def get_settings():
         "default_system_prompt": store.get_setting("default_system_prompt") or "",
         "default_temperature": float(store.get_setting("default_temperature") or 0.7),
         "default_context_length": int(store.get_setting("default_context_length") or 0),
+        "default_think": store.get_setting("default_think") or None,
     }
 
 
@@ -361,8 +366,18 @@ async def update_settings(body: SettingsUpdate):
         and body.default_system_prompt is None
         and body.default_temperature is None
         and body.default_context_length is None
+        and body.default_think is None
     ):
         raise HTTPException(422, "nothing to update")
+    if body.default_think is not None:
+        try:
+            think = store.normalize_think(body.default_think)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        if think is None:
+            store.set_setting("default_think", "")
+        else:
+            store.set_setting("default_think", think)
     if body.default_system_prompt is not None:
         store.set_setting("default_system_prompt", body.default_system_prompt)
     if body.default_temperature is not None:
@@ -398,6 +413,43 @@ async def update_settings(body: SettingsUpdate):
     }
 
 
+@app.get("/api/system-prompt/bundled")
+async def system_prompt_bundled():
+    return {"content": store.bundled_system_prompt()}
+
+
+@app.get("/api/system-prompt/file")
+async def system_prompt_file():
+    if not store.PROMPT_FILE.exists():
+        return {"content": None, "mtime": None}
+    return {
+        "content": store.PROMPT_FILE.read_text(encoding="utf-8"),
+        "mtime": store.PROMPT_FILE.stat().st_mtime,
+    }
+
+
+class SystemPromptOpen(BaseModel):
+    content: str = ""
+
+
+@app.post("/api/system-prompt/open")
+async def system_prompt_open(body: SystemPromptOpen):
+    """Write the draft to the user's prompt file and open it in the OS
+    default .txt editor (the user's own choice). The frontend polls
+    /api/system-prompt/file and picks up saves."""
+    store.PROMPT_FILE.write_text(body.content, encoding="utf-8")
+    try:
+        if os.name == "nt":
+            os.startfile(str(store.PROMPT_FILE))  # noqa: S606
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(store.PROMPT_FILE)])
+        else:
+            subprocess.Popen(["xdg-open", str(store.PROMPT_FILE)])
+    except Exception as exc:
+        raise HTTPException(502, f"could not open a text editor: {exc}")
+    return {"ok": True, "path": str(store.PROMPT_FILE), "mtime": store.PROMPT_FILE.stat().st_mtime}
+
+
 @app.post("/api/eject")
 async def eject():
     if os.name == "nt":
@@ -429,8 +481,12 @@ async def conversations():
 
 @app.post("/api/conversations")
 async def create_conversation(body: ConversationCreate):
+    try:
+        think = store.normalize_think(body.think)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
     return store.create_conversation(
-        body.title, body.model, body.system_prompt, body.temperature, body.context_length
+        body.title, body.model, body.system_prompt, body.temperature, body.context_length, think
     )
 
 
@@ -444,14 +500,22 @@ async def get_conversation(conversation_id: int):
 
 @app.patch("/api/conversations/{conversation_id}")
 async def update_conversation(conversation_id: int, body: ConversationUpdate):
-    updated = store.update_conversation(
-        conversation_id,
+    kwargs = dict(
         title=body.title,
         model=body.model,
         system_prompt=body.system_prompt,
         temperature=body.temperature,
         context_length=body.context_length,
     )
+    if body.think is not None:
+        try:
+            kwargs["think"] = store.normalize_think(body.think)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+    try:
+        updated = store.update_conversation(conversation_id, **kwargs)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
     if not updated:
         raise HTTPException(404, "Conversation not found")
     return updated
@@ -495,6 +559,7 @@ async def chat(body: ChatRequest):
         store.update_conversation(body.conversation_id, title=content[:60])
     history = build_history(store.get_messages(body.conversation_id))
     tools = TOOLS if body.tools and await ollama.model_supports_tools(model) else None
+    think = body.think if body.think is not None else conversation.get("think")
     sys_prompt = conversation["system_prompt"]
     if tools:
         directive = (
@@ -537,6 +602,7 @@ async def chat(body: ChatRequest):
                     conversation["temperature"],
                     conversation["context_length"],
                     tools=tools if with_tools else None,
+                    think=think,
                 ):
                     if "error" in chunk:
                         save()

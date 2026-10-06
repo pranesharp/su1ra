@@ -23,6 +23,24 @@ def _data_dir():
 DATA_DIR = _data_dir()
 DB_PATH = DATA_DIR / "app.db"
 
+PROMPT_FILENAME = "sysp.txt"
+PROMPT_FILE = DATA_DIR / "system-prompt.txt"
+
+
+def bundled_prompt_path():
+    if getattr(sys, "frozen", False):
+        base = Path(sys._MEIPASS)
+    else:
+        base = PROJECT_ROOT
+    return base / PROMPT_FILENAME
+
+
+def bundled_system_prompt():
+    try:
+        return bundled_prompt_path().read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
 
 def _connect():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -63,11 +81,23 @@ def init_db():
         columns = [r["name"] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()]
         if "context_length" not in columns:
             conn.execute("ALTER TABLE conversations ADD COLUMN context_length INTEGER NOT NULL DEFAULT 0")
+        if "think" not in columns:
+            conn.execute("ALTER TABLE conversations ADD COLUMN think TEXT")
         msg_columns = [r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
         if "stats" not in msg_columns:
             conn.execute("ALTER TABLE messages ADD COLUMN stats TEXT")
         if "tool_calls" not in msg_columns:
             conn.execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT")
+        # Seed the bundled system prompt once: NULL means "never set".
+        # An explicitly cleared ("") default is left alone.
+        row = conn.execute("SELECT value FROM settings WHERE key = 'default_system_prompt'").fetchone()
+        if row is None:
+            bundled = bundled_system_prompt()
+            if bundled.strip():
+                conn.execute(
+                    "INSERT INTO settings (key, value) VALUES ('default_system_prompt', ?)",
+                    (bundled,),
+                )
 
 
 def get_setting(key):
@@ -85,7 +115,24 @@ def set_setting(key, value):
         )
 
 
+THINK_VALUES = ("on", "off", "low", "medium", "high", "max")
+
+
+def normalize_think(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    text = str(value).strip().lower()
+    if text in ("", "auto", "default", "none"):
+        return None
+    if text in THINK_VALUES:
+        return text
+    raise ValueError(f"think must be auto/on/off (got {value!r})")
+
+
 def _conversation_dict(row):
+    keys = set(row.keys())
     return {
         "id": row["id"],
         "title": row["title"],
@@ -93,6 +140,7 @@ def _conversation_dict(row):
         "system_prompt": row["system_prompt"],
         "temperature": row["temperature"],
         "context_length": row["context_length"],
+        "think": row["think"] if "think" in keys else None,
         "created_at": row["created_at"],
     }
 
@@ -103,11 +151,12 @@ def list_conversations():
         return [_conversation_dict(r) for r in rows]
 
 
-def create_conversation(title="", model="", system_prompt="", temperature=0.7, context_length=0):
+def create_conversation(title="", model="", system_prompt="", temperature=0.7, context_length=0, think=None):
+    think = normalize_think(think)
     with _connect() as conn:
         cursor = conn.execute(
-            "INSERT INTO conversations (title, model, system_prompt, temperature, context_length) VALUES (?, ?, ?, ?, ?)",
-            (title, model, system_prompt, temperature, context_length),
+            "INSERT INTO conversations (title, model, system_prompt, temperature, context_length, think) VALUES (?, ?, ?, ?, ?, ?)",
+            (title, model, system_prompt, temperature, context_length, think),
         )
         row = conn.execute("SELECT * FROM conversations WHERE id = ?", (cursor.lastrowid,)).fetchone()
         return _conversation_dict(row)
@@ -125,6 +174,8 @@ def update_conversation(conversation_id, **fields):
         for k, v in fields.items()
         if k in ("title", "model", "system_prompt", "temperature", "context_length") and v is not None
     }
+    if "think" in fields:
+        allowed["think"] = normalize_think(fields["think"])
     if not allowed:
         return get_conversation(conversation_id)
     sets = ", ".join(f"{k} = ?" for k in allowed)

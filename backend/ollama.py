@@ -180,7 +180,24 @@ async def list_models():
         return []
 
 
-async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ctx=0, tools=None):
+def normalize_think_param(think):
+    if think is None:
+        return None
+    if isinstance(think, bool):
+        return think
+    text = str(think).strip().lower()
+    if text in ("", "auto", "default", "none"):
+        return None
+    if text in ("on", "true", "1"):
+        return True
+    if text in ("off", "false", "0"):
+        return False
+    if text in ("low", "medium", "high", "max"):
+        return text
+    return None
+
+
+async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ctx=0, tools=None, think=None):
     base = base_url()
     payload_messages = (
         [{"role": "system", "content": system_prompt}] if system_prompt.strip() else []
@@ -194,6 +211,9 @@ async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ct
         "stream": True,
         "options": options,
     }
+    think_param = normalize_think_param(think)
+    if think_param is not None:
+        payload["think"] = think_param
     if tools:
         payload["tools"] = tools
     t0 = time.perf_counter()

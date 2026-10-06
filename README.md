@@ -33,6 +33,7 @@ React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
   | `/delchat` | delete a chat |
   | `/settings` | open the settings modal |
   | `/stats` | toggle per-reply performance stats |
+  | `/think` | thinking — `/think`, `/think on\|off\|auto` (this chat, persisted) |
   | `/eject` | shut down the Ollama server |
   | `/connect` | start / reconnect Ollama |
   | `/ide` | toggle the Python IDE pane |

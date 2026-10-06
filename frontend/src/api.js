@@ -71,6 +71,9 @@ export const clearAllConversations = () => sendJSON('/api/conversations/clear-al
 export const clearConversation = (id) => sendJSON(`/api/conversations/${id}/clear`, 'POST')
 
 export const saveSettings = (data) => sendJSON('/api/settings', 'PATCH', data)
+export const getBundledPrompt = () => getJSON('/api/system-prompt/bundled')
+export const getPromptFile = () => getJSON('/api/system-prompt/file')
+export const openPromptInEditor = (content) => sendJSON('/api/system-prompt/open', 'POST', { content })
 export const downloadArtifact = (content, filename, extra) => sendJSON('/api/download', 'POST', { content, filename, ...(extra || {}) })
 
 export const deleteModel = (name) => sendJSON(`/api/models/${encodeURIComponent(name)}`, 'DELETE')

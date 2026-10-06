@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ACCENTS, DEFAULT_ACCENT } from '../theme'
+import { getBundledPrompt, getPromptFile, openPromptInEditor } from '../api'
 
 const CTX_STEPS = [0, 512, 1024, 2048, 4096, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 131072]
 
@@ -24,6 +25,61 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
   const [nativeCtx, setNativeCtx] = useState(0)
   const [selectedAccent, setSelectedAccent] = useState(accent || DEFAULT_ACCENT)
   const [sandboxOn, setSandboxOn] = useState(sandboxTools !== false)
+  const [think, setThink] = useState(conversation?.think || 'auto')
+  const [extMsg, setExtMsg] = useState(null)
+  const [watching, setWatching] = useState(false)
+  const watchMtimeRef = useRef(null)
+  const pollRef = useRef(null)
+
+  function stopWatching() {
+    if (pollRef.current) clearInterval(pollRef.current)
+    pollRef.current = null
+    watchMtimeRef.current = null
+    setWatching(false)
+  }
+
+  useEffect(() => stopWatching, [])
+
+  async function openExternal() {
+    try {
+      const res = await openPromptInEditor(systemPrompt)
+      watchMtimeRef.current = res.mtime
+      setWatching(true)
+      setExtMsg(`opened in your editor — save the file to update this box (${res.path})`)
+      if (pollRef.current) clearInterval(pollRef.current)
+      const deadline = Date.now() + 10 * 60 * 1000
+      pollRef.current = setInterval(async () => {
+        if (Date.now() > deadline) {
+          stopWatching()
+          return
+        }
+        try {
+          const f = await getPromptFile()
+          if (f.mtime && f.mtime !== watchMtimeRef.current) {
+            watchMtimeRef.current = f.mtime
+            setSystemPrompt(f.content ?? '')
+            setExtMsg('// reloaded from external editor — Save to apply')
+          }
+        } catch { /* keep watching */ }
+      }, 1500)
+    } catch (err) {
+      setExtMsg(`// could not open editor: ${err.message}`)
+    }
+  }
+
+  async function resetDefault() {
+    try {
+      const b = await getBundledPrompt()
+      if (b.content) {
+        setSystemPrompt(b.content)
+        setExtMsg('// restored bundled default — Save to apply')
+      } else {
+        setExtMsg('// no bundled default found')
+      }
+    } catch (err) {
+      setExtMsg(`// reset failed: ${err.message}`)
+    }
+  }
 
   useEffect(() => {
     let alive = true
@@ -87,6 +143,12 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
             onChange={(e) => setSystemPrompt(e.target.value)}
             placeholder="You are a helpful assistant."
           />
+          <div className="prompt-actions">
+            <button className="btn-ghost" onClick={openExternal}>[ edit in external editor ]</button>
+            <button className="btn-ghost" onClick={resetDefault}>[ reset to default ]</button>
+            {watching && <button className="btn-ghost" onClick={stopWatching}>[ stop watching ]</button>}
+          </div>
+          {extMsg && <p className="prompt-note">{extMsg}</p>}
         </label>
         <label>
           <span>Temperature</span>
@@ -135,6 +197,18 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
             <p className="ctx-warn">// above {model}'s trained window ({fmtTokens(nativeCtx)}) — quality will degrade</p>
           )}
         </label>
+        <label>
+          <span>Thinking (this chat + new chats)</span>
+          <select
+            value={think}
+            onChange={(e) => setThink(e.target.value)}
+            style={{ width: '100%' }}
+          >
+            <option value="auto">auto (model default)</option>
+            <option value="on">on</option>
+            <option value="off">off</option>
+          </select>
+        </label>
         <label className="sandbox-row">
           <input
             type="checkbox"
@@ -144,8 +218,9 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
           <span>Sandbox model-run code (no network, isolated filesystem — Linux only)</span>
         </label>
         <div className="hub-launch">
-          <span>Need another model?</span>
-          <button className="btn-ghost" onClick={onOpenModels}>[ pull models ]</button>
+          <div className="hub-title">Need another model?</div>
+          <div className="hub-sub">Pull from the Ollama library — e.g. qwen3, gemma3, deepseek-r1</div>
+          <button className="btn-accent hub-cta" onClick={onOpenModels}>[ pull models ]</button>
         </div>
         <div className="modal-actions">
           <button className="btn-ghost" onClick={onClose}>Cancel</button>
@@ -157,6 +232,7 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
                 systemPrompt,
                 temperature,
                 contextLength: savedCtx,
+                think: think === 'auto' ? null : think,
                 accent: selectedAccent,
                 sandboxTools: sandboxOn,
               })
