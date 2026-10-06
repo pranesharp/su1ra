@@ -1175,12 +1175,31 @@ button {
   overflow-wrap: anywhere;
 }
 
-.sandbox-row {
+.modal label.sandbox-row {
   display: flex;
-  gap: 8px;
-  align-items: center;
-  font-size: 11px;
-  opacity: 0.85;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 12px;
+  opacity: 1;
+  cursor: pointer;
+}
+
+.modal label.sandbox-row input {
+  width: auto;
+  flex-shrink: 0;
+  margin-top: 2px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.modal label.sandbox-row span {
+  display: inline;
+  margin: 0;
+  line-height: 1.6;
+}
+
+.modal label.sandbox-row span::before {
+  content: none;
 }
 
 .pull-section {
