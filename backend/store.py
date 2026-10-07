@@ -88,14 +88,57 @@ def init_db():
             conn.execute("ALTER TABLE messages ADD COLUMN stats TEXT")
         if "tool_calls" not in msg_columns:
             conn.execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT")
-        # Seed the bundled system prompt once: NULL means "never set".
-        # An explicitly cleared ("") default is left alone.
+        # Seed / refresh the bundled system prompt:
+        # - NULL means "never set" -> insert bundled.
+        # - An explicitly cleared ("") default is left alone.
+        # - A pristine default (still equal to the last bundled text we
+        #   applied) follows bundled updates, so reinstalls/updates pick
+        #   up a new sysp.txt without wiping chats.
+        # - A user-customized default (differs from the last bundled text)
+        #   is preserved; only the marker advances.
+        # The marker key tracks the last bundled text we have seen, so we
+        # can tell "pristine but stale" apart from "customized".
         row = conn.execute("SELECT value FROM settings WHERE key = 'default_system_prompt'").fetchone()
-        if row is None:
-            bundled = bundled_system_prompt()
-            if bundled.strip():
+        marker = conn.execute(
+            "SELECT value FROM settings WHERE key = 'default_system_prompt_bundled'"
+        ).fetchone()
+        bundled = bundled_system_prompt()
+        if bundled.strip():
+            if row is None:
                 conn.execute(
                     "INSERT INTO settings (key, value) VALUES ('default_system_prompt', ?)",
+                    (bundled,),
+                )
+                conn.execute(
+                    "INSERT INTO settings (key, value) VALUES ('default_system_prompt_bundled', ?)",
+                    (bundled,),
+                )
+            elif marker is None:
+                # Upgrade path: DBs created before the marker existed.
+                # Push the new bundled text unless the user explicitly
+                # cleared the default.
+                current = row["value"]
+                if current != "":
+                    if current != bundled:
+                        conn.execute(
+                            "UPDATE settings SET value = ? WHERE key = 'default_system_prompt'",
+                            (bundled,),
+                        )
+                conn.execute(
+                    "INSERT INTO settings (key, value) VALUES ('default_system_prompt_bundled', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (bundled,),
+                )
+            elif marker["value"] != bundled:
+                current = row["value"]
+                if current == marker["value"]:
+                    conn.execute(
+                        "UPDATE settings SET value = ? WHERE key = 'default_system_prompt'",
+                        (bundled,),
+                    )
+                # Empty ("") and customized values are preserved here.
+                conn.execute(
+                    "UPDATE settings SET value = ? WHERE key = 'default_system_prompt_bundled'",
                     (bundled,),
                 )
 

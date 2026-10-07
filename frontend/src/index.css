@@ -1265,6 +1265,75 @@ button {
 .modal-wide {
   width: min(640px, 92vw);
 }
+.modal-settings {
+  width: min(580px, 94vw);
+}
+.modal-list {
+  width: min(580px, 94vw);
+}
+.modal-split {
+  width: min(780px, 96vw);
+}
+
+.view-toggle {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+
+.view-toggle button {
+  font-size: 12px;
+  color: var(--faint);
+  padding: 2px 4px;
+}
+
+.view-toggle button:hover {
+  color: var(--accent-bright);
+}
+
+.view-toggle button.on {
+  color: var(--accent-bright);
+  text-decoration: underline;
+}
+
+.loadout-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 16px;
+  align-items: start;
+}
+
+.loadout-col {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 14px 14px;
+  margin-top: 14px;
+  min-width: 0;
+}
+
+.loadout-title {
+  font-size: 12.5px;
+  color: var(--accent);
+  margin-top: 10px;
+}
+
+.think-toggle {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-ghost.on {
+  color: var(--accent-bright);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+@media (max-width: 720px) {
+  .loadout-grid {
+    grid-template-columns: 1fr;
+  }
+}
 .hub-launch {
   display: flex;
   flex-direction: column;
@@ -1427,6 +1496,9 @@ button {
 }
 .setup-phase {
   color: var(--muted);
+}
+.setup-hint {
+  color: var(--accent);
 }
 
 /* user message hover actions + inline edit */

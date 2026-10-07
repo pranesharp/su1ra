@@ -165,6 +165,7 @@ class ChatRequest(BaseModel):
     model: str = ""
     tools: bool = False
     think: bool | str | None = None
+    code_mode: bool = False
 
 
 class ConversationCreate(BaseModel):
@@ -196,6 +197,16 @@ class SettingsUpdate(BaseModel):
     default_temperature: float | None = None
     default_context_length: int | None = None
     default_think: bool | str | None = None
+    loadout_casual_model: str | None = None
+    loadout_code_model: str | None = None
+    loadout_casual_ctx: int | None = None
+    loadout_code_ctx: int | None = None
+    bg_brightness: int | None = None
+    bg_contrast: int | None = None
+    loadout_casual_think: str | None = None
+    settings_view: str | None = None
+    engine: str | None = None
+    engine_vulkan: bool | None = None
 
 
 class RunRequest(BaseModel):
@@ -246,6 +257,32 @@ async def ollama_start():
 async def ollama_stop():
     """Stop the server only if Su1ra spawned it (never a user's own server)."""
     return {"ok": True, "stopped": ollama.stop_spawned()}
+
+
+@app.get("/api/gpu")
+async def gpu_info():
+    """GPU discovery + the engine env a server restart would apply."""
+    return {**ollama.detect_gpus(), "env": ollama.engine_env(), "spawned": ollama.has_spawned()}
+
+
+@app.post("/api/ollama/restart")
+async def ollama_restart():
+    """Restart a Su1ra-spawned server so engine changes take effect.
+
+    A server the user runs themselves is never touched: changing engine env
+    requires restarting that server by hand (the /api/gpu env preview shows
+    exactly which variables to set).
+    """
+    if (await ollama.server_status())["ok"] and not ollama.has_spawned():
+        return {
+            "ok": False,
+            "error": "that server wasn't started by Su1ra — restart Ollama yourself for engine changes to apply",
+        }
+    ollama.stop_spawned()
+    res = await ollama.ensure_running()
+    if res.get("ok"):
+        return {"ok": True, "started": True, "url": res.get("url")}
+    return {"ok": False, "error": res.get("error", "could not start ollama")}
 
 
 @app.post("/api/ollama/install")
@@ -321,6 +358,20 @@ async def cancel_pull(body: PullRequest):
     return {"ok": True}
 
 
+@app.post("/api/models/unload")
+async def unload_model(body: PullRequest):
+    """Unload a model from the Ollama server to free memory.
+
+    Best-effort: returns ok True only when the server accepted the unload.
+    Callers switch modes regardless — a failed unload just leaves the old
+    model warm until Ollama evicts it.
+    """
+    name = body.model.strip()
+    if not name:
+        raise HTTPException(422, "model name required")
+    return {"ok": True, "unloaded": await ollama.unload_model(name)}
+
+
 @app.delete("/api/models/{name:path}")
 async def delete_model(name: str):
     name = name.strip()
@@ -351,6 +402,16 @@ async def get_settings():
         "default_temperature": float(store.get_setting("default_temperature") or 0.7),
         "default_context_length": int(store.get_setting("default_context_length") or 0),
         "default_think": store.get_setting("default_think") or None,
+        "loadout_casual_model": store.get_setting("loadout_casual_model") or "",
+        "loadout_code_model": store.get_setting("loadout_code_model") or "",
+        "loadout_casual_ctx": int(store.get_setting("loadout_casual_ctx") or 0),
+        "loadout_code_ctx": int(store.get_setting("loadout_code_ctx") or 0),
+        "bg_brightness": int(store.get_setting("bg_brightness") or 100),
+        "bg_contrast": int(store.get_setting("bg_contrast") or 100),
+        "loadout_casual_think": store.get_setting("loadout_casual_think") or "",
+        "settings_view": store.get_setting("settings_view") or "split",
+        "engine": store.get_setting("engine") or "auto",
+        "engine_vulkan": store.get_setting("engine_vulkan") == "1",
     }
 
 
@@ -367,6 +428,16 @@ async def update_settings(body: SettingsUpdate):
         and body.default_temperature is None
         and body.default_context_length is None
         and body.default_think is None
+        and body.loadout_casual_model is None
+        and body.loadout_code_model is None
+        and body.loadout_casual_ctx is None
+        and body.loadout_code_ctx is None
+        and body.bg_brightness is None
+        and body.bg_contrast is None
+        and body.loadout_casual_think is None
+        and body.settings_view is None
+        and body.engine is None
+        and body.engine_vulkan is None
     ):
         raise HTTPException(422, "nothing to update")
     if body.default_think is not None:
@@ -384,6 +455,35 @@ async def update_settings(body: SettingsUpdate):
         store.set_setting("default_temperature", str(body.default_temperature))
     if body.default_context_length is not None:
         store.set_setting("default_context_length", str(max(0, int(body.default_context_length))))
+    if body.loadout_casual_model is not None:
+        store.set_setting("loadout_casual_model", body.loadout_casual_model.strip())
+    if body.loadout_code_model is not None:
+        store.set_setting("loadout_code_model", body.loadout_code_model.strip())
+    if body.loadout_casual_ctx is not None:
+        store.set_setting("loadout_casual_ctx", str(max(0, int(body.loadout_casual_ctx))))
+    if body.loadout_code_ctx is not None:
+        store.set_setting("loadout_code_ctx", str(max(0, int(body.loadout_code_ctx))))
+    if body.bg_brightness is not None:
+        store.set_setting("bg_brightness", str(max(0, min(150, int(body.bg_brightness)))))
+    if body.bg_contrast is not None:
+        store.set_setting("bg_contrast", str(max(0, min(150, int(body.bg_contrast)))))
+    if body.loadout_casual_think is not None:
+        v = body.loadout_casual_think.strip().lower()
+        if v not in ("on", "off", ""):
+            raise HTTPException(422, "loadout_casual_think must be on, off, or empty")
+        store.set_setting("loadout_casual_think", v)
+    if body.settings_view is not None:
+        v = body.settings_view.strip().lower()
+        if v not in ("list", "split"):
+            raise HTTPException(422, "settings_view must be list or split")
+        store.set_setting("settings_view", v)
+    if body.engine is not None:
+        v = body.engine.strip().lower()
+        if v not in ("auto", "cpu", "gpu"):
+            raise HTTPException(422, "engine must be auto, cpu, or gpu")
+        store.set_setting("engine", v)
+    if body.engine_vulkan is not None:
+        store.set_setting("engine_vulkan", "1" if body.engine_vulkan else "0")
     if body.ollama_url is not None:
         if not body.ollama_url.startswith(("http://", "https://")):
             raise HTTPException(422, "ollama_url must start with http:// or https://")
@@ -452,10 +552,15 @@ async def system_prompt_open(body: SystemPromptOpen):
 
 @app.post("/api/eject")
 async def eject():
+    # taskkill targets the launcher, but orphaned llama-server.exe workers
+    # (parent already gone) survive it — kill them by name too, or memory
+    # stays occupied after eject.
     if os.name == "nt":
         subprocess.run(["taskkill", "/F", "/T", "/IM", "ollama.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/F", "/IM", "llama-server.exe"], capture_output=True)
     else:
         subprocess.run(["pkill", "-f", "ollama serve"], capture_output=True)
+        subprocess.run(["pkill", "-f", "llama-server"], capture_output=True)
     for _ in range(10):
         if not (await ollama.server_status())["ok"]:
             break
@@ -463,8 +568,10 @@ async def eject():
     else:
         if os.name == "nt":
             subprocess.run(["taskkill", "/F", "/T", "/IM", "ollama.exe"], capture_output=True)
+            subprocess.run(["taskkill", "/F", "/IM", "llama-server.exe"], capture_output=True)
         else:
             subprocess.run(["pkill", "-9", "-f", "ollama serve"], capture_output=True)
+            subprocess.run(["pkill", "-9", "-f", "llama-server"], capture_output=True)
         await asyncio.sleep(0.3)
     return {"ok": True, "server_ok": (await ollama.server_status())["ok"]}
 
@@ -560,7 +667,9 @@ async def chat(body: ChatRequest):
     history = build_history(store.get_messages(body.conversation_id))
     tools = TOOLS if body.tools and await ollama.model_supports_tools(model) else None
     think = body.think if body.think is not None else conversation.get("think")
-    sys_prompt = conversation["system_prompt"]
+    # The stored system prompt only applies in code mode — casual chats
+    # go out with no system prompt.
+    sys_prompt = conversation["system_prompt"] if body.code_mode else ""
     if tools:
         directive = (
             "You have the run_python tool. Use it proactively whenever the task involves "

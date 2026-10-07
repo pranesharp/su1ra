@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from './api'
-import { applyAccent, DEFAULT_ACCENT } from './theme'
+import { applyAccent, applyBackground, DEFAULT_ACCENT, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST } from './theme'
 import ChatView, { splitThinking } from './components/ChatView.jsx'
 import Composer from './components/Composer.jsx'
 import Logo from './components/Logo.jsx'
@@ -22,7 +22,9 @@ const COMMANDS = [
   { cmd: '/connect', desc: 'start / reconnect the ollama server' },
   { cmd: '/stats', desc: 'toggle per-reply performance stats' },
   { cmd: '/think', desc: 'thinking — /think, /think on|off|auto (this chat, persisted)' },
-  { cmd: '/code', desc: 'toggle code mode — the model may run code; /code <msg> arms one message' },
+  { cmd: '/code', desc: 'toggle code mode — switches to the code loadout model/ctx, unloads the casual model; /code <msg> arms one message' },
+  { cmd: '/casual', desc: 'switch to casual mode — everyday chat model, unloads the code model, tools off' },
+  { cmd: '/modes', desc: 'show current mode — casual/code plus model, ctx, think, tools' },
   { cmd: '/ide', desc: 'toggle the python ide pane' },
 ]
 
@@ -46,6 +48,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [modelHubOpen, setModelHubOpen] = useState(false)
   const [accent, setAccent] = useState(DEFAULT_ACCENT)
+  const [bgBrightness, setBgBrightness] = useState(DEFAULT_BRIGHTNESS)
+  const [bgContrast, setBgContrast] = useState(DEFAULT_CONTRAST)
   const [showStats, setShowStats] = useState(false)
   const [ideOpen, setIdeOpen] = useState(false)
   const [ideWidth, setIdeWidth] = useState(460)
@@ -55,12 +59,17 @@ export default function App() {
   const [artifactTab, setArtifactTab] = useState('preview')
   const [codeArmed, setCodeArmed] = useState(false)
   const [sandboxTools, setSandboxTools] = useState(true)
+  const [loadout, setLoadout] = useState({ casualModel: '', codeModel: '', casualCtx: 0, codeCtx: 0, casualThink: 'off' })
+  const [engine, setEngine] = useState('auto')
+  const [engineVulkan, setEngineVulkan] = useState(false)
+  const [settingsView, setSettingsView] = useState('split')
   const abortRef = useRef(null)
   const modelPullRef = useRef(null)
   const pendingToolRef = useRef(null)
   const ideRunSeenRef = useRef(null)
   const [runSignal, setRunSignal] = useState(0)
   const idRef = useRef(1000)
+  const bootedRef = useRef(false)
   const chatDefaultsRef = useRef({ system_prompt: '', temperature: 0.7, context_length: 0, think: null })
   const widthRef = useRef(460)
   const moveRef = useRef(null)
@@ -71,6 +80,10 @@ export default function App() {
   useEffect(() => {
     applyAccent(accent)
   }, [accent])
+
+  useEffect(() => {
+    applyBackground(bgBrightness, bgContrast)
+  }, [bgBrightness, bgContrast])
 
   // Right-button text selection + right-click copy menu. Chromium does not
   // start selections with the right button, and the desktop shell may not
@@ -199,11 +212,33 @@ export default function App() {
       ])
       setStatus(statusRes)
       setAccent(settingsRes.accent || DEFAULT_ACCENT)
+      // ?? — 0 is a valid vanta-black value, must not fall back to 100
+      setBgBrightness(settingsRes.bg_brightness ?? DEFAULT_BRIGHTNESS)
+      setBgContrast(settingsRes.bg_contrast ?? DEFAULT_CONTRAST)
+      // Loadout contexts are the persisted defaults (survive restart).
+      // Casual falls back to the legacy default for users upgrading.
+      const casualCtx = settingsRes.loadout_casual_ctx || settingsRes.default_context_length || 0
+      const codeCtx = settingsRes.loadout_code_ctx || 0
+      // casual think: loadout toggle wins, legacy default_think migrates, fresh installs get off
+      const casualThink = (settingsRes.loadout_casual_think || settingsRes.default_think) === 'on' ? 'on' : 'off'
+      setLoadout({
+        casualModel: settingsRes.loadout_casual_model || '',
+        codeModel: settingsRes.loadout_code_model || '',
+        casualCtx,
+        codeCtx,
+        casualThink,
+      })
+      setSettingsView(settingsRes.settings_view === 'list' ? 'list' : 'split')
+      setEngine(['auto', 'cpu', 'gpu'].includes(settingsRes.engine) ? settingsRes.engine : 'auto')
+      setEngineVulkan(settingsRes.engine_vulkan === true)
       chatDefaultsRef.current = {
         system_prompt: settingsRes.default_system_prompt || '',
         temperature: typeof settingsRes.default_temperature === 'number' ? settingsRes.default_temperature : 0.7,
-        context_length: settingsRes.default_context_length || 0,
-        think: settingsRes.default_think || null,
+        context_length: casualCtx,
+        // unset per chat: at send time a null falls back to the loadout
+        // (casual toggle) or forced-on (code mode). A stored 'off' would
+        // shadow code mode's think-on, so only /think writes it explicitly.
+        think: null,
       }
       setShowStats(settingsRes.show_stats === true)
       setIdeOpen(settingsRes.ide_open === true)
@@ -211,14 +246,15 @@ export default function App() {
       setSandboxTools(settingsRes.sandbox_tools !== false)
       setModels(modelsRes.models)
       setConversations(convsRes.conversations)
-      if (convsRes.conversations.length > 0) {
-        const detail = await api.getConversation(convsRes.conversations[0].id)
-        if (detail) {
-          setActiveId(detail.conversation.id)
-          setMessages(detail.messages)
-          setSelectedModel(detail.conversation.model || '')
-        }
-      }
+      // Startup is always a fresh casual desk: no chat selected (history stays
+      // in /chats), casual loadout preselected. The first send lazily creates
+      // the chat, so nothing from a previous session leaks into the new one.
+      const casualModel = settingsRes.loadout_casual_model || ''
+      setCodeArmed(false)
+      setActiveId(null)
+      setMessages([])
+      if (casualModel) setSelectedModel(casualModel)
+      bootedRef.current = true
     }
     boot()
   }, [])
@@ -273,6 +309,53 @@ export default function App() {
     setSelectedModel(name)
     if (activeConversation) {
       const updated = await api.updateConversation(activeConversation.id, { model: name })
+      if (updated) {
+        setConversations((prev) => prev.map((c) => (c.id === updated.id ? updated : c)))
+      }
+    }
+  }
+
+  // Unload the outgoing model on a mode switch only (never on /newchat or
+  // boot): if the loadouts name different models, drop the old one first so
+  // a 16GB box doesn't carry both resident. Best-effort — the switch
+  // proceeds even when the unload fails.
+  async function unloadIfSwitching(oldName, newName) {
+    if (!oldName || !newName || oldName === newName) return false
+    try {
+      const res = await api.unloadModel(oldName)
+      return res && res.unloaded === true
+    } catch {
+      return false
+    }
+  }
+
+  // Leaving code mode = entering casual: restore the casual loadout
+  // (model + ctx), disarm tools. Startup lands here too (codeArmed=false).
+  async function leaveCodeMode(echo) {
+    const currentCtx = activeConversation?.context_length ?? chatDefaultsRef.current.context_length ?? 0
+    const casualModel = loadout.casualModel || selectedModel
+    const oldModel = activeConversation?.model || selectedModel
+    const unloaded = await unloadIfSwitching(oldModel, casualModel)
+    const newCtx = loadout.casualCtx || currentCtx
+    await applyModelCtx(casualModel, newCtx)
+    if (loadout.casualCtx) {
+      await api.saveSettings({ default_context_length: newCtx, loadout_casual_ctx: newCtx })
+    }
+    setCodeArmed(false)
+    pushSystem(
+      `${echo}\n\n// casual mode — model ${casualModel || '(unchanged)'}${unloaded ? ` · unloaded ${oldModel}` : ''} · ctx ${newCtx} · think ${loadout.casualThink === 'on' ? 'on' : 'off'} · tools off`,
+    )
+  }
+
+  // Apply a model + context switch (loadout changes): updates the picker,
+  // the active conversation (persisted per chat) and the new-chat defaults.
+  async function applyModelCtx(name, ctx) {
+    if (name) setSelectedModel(name)
+    chatDefaultsRef.current = { ...chatDefaultsRef.current, context_length: ctx }
+    if (activeConversation) {
+      const patch = { context_length: ctx }
+      if (name) patch.model = name
+      const updated = await api.updateConversation(activeConversation.id, patch)
       if (updated) {
         setConversations((prev) => prev.map((c) => (c.id === updated.id ? updated : c)))
       }
@@ -455,6 +538,12 @@ export default function App() {
     }
 
     if (cmd === '/settings') {
+      // settings mount from DB truth — never open on stale pre-boot state,
+      // or an early save could wipe persisted values with empties
+      if (!bootedRef.current) {
+        pushSystem(`${echo}\n\n// still starting — try /settings again in a moment`)
+        return
+      }
       pushSystem(`${echo}`)
       setSettingsOpen(true)
       return
@@ -478,7 +567,7 @@ export default function App() {
       setStatus(await api.getStatus())
       const line = res.ok
         ? res.started
-          ? `// ollama started — connected to ${res.url}`
+          ? `// ollama started — connected to ${res.url}\n// new here? pull a model in /settings, then /models <name> to chat`
           : '// ollama already running — connected'
         : `// ${res.error}`
       pushSystem(`${echo}\n\n${line}`)
@@ -501,7 +590,7 @@ export default function App() {
       const current = activeConversation?.think ?? chatDefaultsRef.current.think ?? null
       let next = null
       if (!mode) {
-        next = current === 'off' ? 'on' : 'off'
+        next = current === 'off' ? 'on' : current === 'on' ? 'off' : 'on'
       } else if (['on', 'true', '1'].includes(mode)) {
         next = 'on'
       } else if (['off', 'false', '0'].includes(mode)) {
@@ -520,7 +609,9 @@ export default function App() {
         }
       } else {
         chatDefaultsRef.current = { ...chatDefaultsRef.current, think: value }
-        await api.saveSettings({ default_think: value === null ? 'auto' : value })
+        // no chat open: /think edits the casual loadout default (auto clears back to off)
+        await api.saveSettings({ loadout_casual_think: value === null ? '' : value })
+        setLoadout((l) => ({ ...l, casualThink: value === 'on' ? 'on' : 'off' }))
       }
       const label = value === null ? 'auto (model default)' : value
       pushSystem(`${echo}\n\n// thinking: ${label}${activeConversation ? '' : ' — applies to new chats'}`)
@@ -539,15 +630,53 @@ export default function App() {
     if (cmd === '/code') {
       const rest = arg
       if (rest) {
-        pushSystem(`${echo}\n\n// one-shot: tools armed for this message`)
+        pushSystem(`${echo}\n\n// one-shot: tools armed for this message (model unchanged)`)
         await send(rest, { forceArmed: true })
       } else {
         const next = !codeArmed
-        setCodeArmed(next)
-        pushSystem(
-          `${echo}\n\n${next ? '// code mode: on — the model may run code (persists until /code again, off on restart)' : '// code mode: off'}`,
-        )
+        const currentCtx = activeConversation?.context_length ?? chatDefaultsRef.current.context_length ?? 0
+        if (next) {
+          // entering code mode: code loadout model + code ctx (at least 50000) + ide open
+          const codeModel = loadout.codeModel || selectedModel
+          const oldModel = activeConversation?.model || selectedModel
+          const unloaded = await unloadIfSwitching(oldModel, codeModel)
+          const newCtx = Math.max(currentCtx, loadout.codeCtx || 50000)
+          await applyModelCtx(codeModel, newCtx)
+          await api.saveSettings({ default_context_length: newCtx, loadout_code_ctx: newCtx })
+          setLoadout((l) => ({ ...l, codeCtx: newCtx }))
+          if (!ideOpen) {
+            setIdeOpen(true)
+            await api.saveSettings({ ide_open: true })
+          }
+          setCodeArmed(true)
+          pushSystem(
+            `${echo}\n\n// code mode: on — model ${codeModel || '(none selected)'}${unloaded ? ` · unloaded ${oldModel}` : ''} · ctx ${newCtx} · think on · ide open (persists until /code or /casual, off on restart)`,
+          )
+        } else {
+          await leaveCodeMode(echo)
+        }
       }
+      return
+    }
+
+    if (cmd === '/casual') {
+      if (!codeArmed) {
+        pushSystem(`${echo}\n\n// already casual — model ${selectedModel || '(none)'} · tools off`)
+        return
+      }
+      await leaveCodeMode(echo)
+      return
+    }
+
+    if (cmd === '/modes') {
+      const mode = codeArmed ? 'code' : 'casual'
+      const effModel = activeConversation?.model || selectedModel || '(none)'
+      const effCtx = activeConversation?.context_length ?? chatDefaultsRef.current.context_length ?? 0
+      const effThink =
+        activeConversation?.think ?? (codeArmed ? 'on' : loadout.casualThink === 'on' ? 'on' : 'off')
+      pushSystem(
+        `${echo}\n\n// mode: ${mode}\n// model: ${effModel} (casual loadout: ${loadout.casualModel || '—'} · code loadout: ${loadout.codeModel || '—'})\n// ctx: ${effCtx} · think: ${effThink || 'auto'} · tools: ${codeArmed ? 'armed' : 'off'} · sysprompt: ${codeArmed ? 'on (code mode)' : 'off (casual)'} · engine: ${engine}${engine === 'gpu' && engineVulkan ? '+vulkan' : ''}`,
+      )
       return
     }
 
@@ -575,8 +704,11 @@ export default function App() {
     }
     const outgoing = attachIdeRun(trimmed)
     const arm = opts.forceArmed === true || codeArmed || /```python\n/.test(outgoing)
+    const codeMode = opts.forceArmed === true || codeArmed
     if (!selectedModel) return
-    const think = activeConversation?.think ?? chatDefaultsRef.current.think ?? null
+    // think: explicit per-chat /think wins; otherwise code mode is fixed on,
+    // casual follows the loadout toggle (off by default)
+    const think = activeConversation?.think ?? (codeMode ? 'on' : (loadout.casualThink === 'on' ? 'on' : 'off'))
     let convId = activeId
     if (!activeConversation) {
       const conversation = await api.createConversation({ model: selectedModel, ...chatDefaultsRef.current })
@@ -594,7 +726,7 @@ export default function App() {
     let replyStats = null
     try {
       await api.streamChat(
-        { conversation_id: convId, content: outgoing, model: selectedModel, tools: arm, think },
+        { conversation_id: convId, content: outgoing, model: selectedModel, tools: arm, think, code_mode: codeMode },
         {
           onUserId: (dbId) =>
             setMessages((prev) => prev.map((m) => (m.id === userMsg.id ? { ...m, id: dbId } : m))),
@@ -814,40 +946,72 @@ export default function App() {
     window.addEventListener('mouseup', onUp)
   }
 
-  async function saveSettings({ ollamaUrl, systemPrompt, temperature, contextLength, think, accent: newAccent, sandboxTools: sandboxPref }) {
+  async function saveSettings({ ollamaUrl, systemPrompt, temperature, contextLength, accent: newAccent, sandboxTools: sandboxPref, loadoutCasualModel, loadoutCodeModel, loadoutCasualCtx, loadoutCodeCtx, loadoutCasualThink, bgBrightness: newBrightness, bgContrast: newContrast, engine: newEngine, engineVulkan: vulkanPref }) {
+    // Autosaved on every change (no Save button) — stay open, skip invalid
+    // mid-typing values instead of failing the whole patch.
+    const url = (ollamaUrl || '').trim()
+    const urlOk = url.startsWith('http://') || url.startsWith('https://')
+    const tempOk = temperature === undefined || Number.isFinite(temperature)
+    // New chats follow the casual loadout ctx (falls back to the per-chat value).
+    const newDefaultCtx = loadoutCasualCtx || contextLength
     await api.saveSettings({
-      ollama_url: ollamaUrl,
+      ...(urlOk ? { ollama_url: url } : {}),
       accent: newAccent,
       ...(sandboxPref === undefined ? {} : { sandbox_tools: sandboxPref }),
       default_system_prompt: systemPrompt,
-      default_temperature: temperature,
-      default_context_length: contextLength,
-      ...(think === undefined ? {} : { default_think: think === null ? 'auto' : think }),
+      ...(tempOk ? { default_temperature: temperature } : {}),
+      default_context_length: newDefaultCtx,
+      ...(loadoutCasualThink === undefined ? {} : { loadout_casual_think: loadoutCasualThink }),
+      ...(loadoutCasualModel === undefined ? {} : { loadout_casual_model: loadoutCasualModel }),
+      ...(loadoutCodeModel === undefined ? {} : { loadout_code_model: loadoutCodeModel }),
+      ...(loadoutCasualCtx === undefined ? {} : { loadout_casual_ctx: loadoutCasualCtx }),
+      ...(loadoutCodeCtx === undefined ? {} : { loadout_code_ctx: loadoutCodeCtx }),
+      ...(newBrightness === undefined ? {} : { bg_brightness: newBrightness }),
+      ...(newContrast === undefined ? {} : { bg_contrast: newContrast }),
+      ...(newEngine === undefined ? {} : { engine: newEngine }),
+      ...(vulkanPref === undefined ? {} : { engine_vulkan: vulkanPref }),
     })
+    if (newEngine !== undefined) setEngine(newEngine)
+    if (vulkanPref !== undefined) setEngineVulkan(vulkanPref)
+    if (loadoutCasualModel !== undefined || loadoutCodeModel !== undefined || loadoutCasualCtx !== undefined || loadoutCodeCtx !== undefined || loadoutCasualThink !== undefined) {
+      setLoadout((l) => ({
+        casualModel: loadoutCasualModel !== undefined ? loadoutCasualModel : l.casualModel,
+        codeModel: loadoutCodeModel !== undefined ? loadoutCodeModel : l.codeModel,
+        casualCtx: loadoutCasualCtx !== undefined ? loadoutCasualCtx : l.casualCtx,
+        codeCtx: loadoutCodeCtx !== undefined ? loadoutCodeCtx : l.codeCtx,
+        casualThink: loadoutCasualThink !== undefined ? (loadoutCasualThink === 'on' ? 'on' : 'off') : l.casualThink,
+      }))
+    }
     chatDefaultsRef.current = {
       system_prompt: systemPrompt,
       temperature,
-      context_length: contextLength,
-      ...(think === undefined ? {} : { think }),
+      context_length: newDefaultCtx,
+      think: loadoutCasualThink !== undefined ? (loadoutCasualThink === 'on' ? 'on' : 'off') : chatDefaultsRef.current.think,
     }
     setStatus(await api.getStatus())
     setAccent(newAccent)
+    if (newBrightness !== undefined) setBgBrightness(newBrightness)
+    if (newContrast !== undefined) setBgContrast(newContrast)
     if (activeConversation) {
       const updated = await api.updateConversation(activeConversation.id, {
         system_prompt: systemPrompt,
-        temperature,
+        ...(tempOk ? { temperature } : {}),
         context_length: contextLength,
-        ...(think === undefined ? {} : { think: think === null ? 'auto' : think }),
       })
       if (updated) {
         setConversations((prev) => prev.map((c) => (c.id === updated.id ? updated : c)))
       }
     }
-    setSettingsOpen(false)
   }
 
   const currentModel = activeConversation?.model || selectedModel
-  const currentThink = activeConversation?.think ?? chatDefaultsRef.current.think ?? null
+  // header shows the effective think: per-chat /think wins, else code is on, else casual toggle
+  const currentThink = activeConversation?.think ?? (codeArmed ? 'on' : (loadout.casualThink === 'on' ? 'on' : 'off'))
+
+  async function changeSettingsView(view) {
+    setSettingsView(view)
+    await api.saveSettings({ settings_view: view })
+  }
 
   return (
     <div className="app">
@@ -864,7 +1028,7 @@ export default function App() {
           <div className="chat-meta">
             <span className="hash">#</span>
             {activeConversation?.title || 'no chat'}
-            <span className="meta-model"> · model: {currentModel || 'none'} · think: {currentThink || 'auto'}</span>
+            <span className="meta-model"> · {codeArmed ? 'code' : 'casual'} · model: {currentModel || 'none'} · think: {currentThink || 'auto'}</span>
           </div>
         </header>
         <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} onLoadToIde={loadToIde} onRunCode={runInIde} onDownloadArtifact={downloadArtifact} onOpenArtifact={openArtifact} onOllamaReady={refreshStatus} onResendFrom={resendFrom} />
@@ -901,6 +1065,15 @@ export default function App() {
             status={status}
             conversation={activeConversation}
             model={activeConversation?.model || ''}
+            models={models}
+            loadout={loadout}
+            view={settingsView}
+            onViewChange={changeSettingsView}
+            bgBrightness={bgBrightness}
+            bgContrast={bgContrast}
+            engine={engine}
+            engineVulkan={engineVulkan}
+            onServerChanged={refreshStatus}
             accent={accent}
             sandboxTools={sandboxTools}
             onSave={saveSettings}

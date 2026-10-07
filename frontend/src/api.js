@@ -78,7 +78,13 @@ export const downloadArtifact = (content, filename, extra) => sendJSON('/api/dow
 
 export const deleteModel = (name) => sendJSON(`/api/models/${encodeURIComponent(name)}`, 'DELETE')
 
+export const unloadModel = (model) => sendJSON('/api/models/unload', 'POST', { model })
+
 export const ejectServer = () => sendJSON('/api/eject', 'POST')
+
+export const getGpu = () => getJSON('/api/gpu')
+
+export const restartServer = () => sendJSON('/api/ollama/restart', 'POST', {})
 
 export const connectServer = () => sendJSON('/api/connect', 'POST', {})
 

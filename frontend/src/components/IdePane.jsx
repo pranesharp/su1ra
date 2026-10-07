@@ -120,6 +120,27 @@ export default function IdePane({ width, code, onCodeChange, onClose, onResizeSt
     })
   }, [width])
 
+  // The terminal canvas keeps its own colors (transparent bg, so it sits on
+  // --surface): follow the html data-mode that applyBackground maintains and
+  // flip the foreground when brightness crosses into light mode.
+  useEffect(() => {
+    function applyTermMode() {
+      const term = termRef.current
+      if (!term) return
+      const light = document.documentElement.dataset.mode === 'light'
+      term.options.theme = {
+        ...term.options.theme,
+        foreground: light ? '#2b2620' : '#c6c6cc',
+        cursorAccent: light ? '#f0ede4' : '#101014',
+        selectionBackground: light ? '#b9b09a66' : '#3a3a4166',
+      }
+    }
+    applyTermMode()
+    const obs = new MutationObserver(applyTermMode)
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-mode'] })
+    return () => obs.disconnect()
+  }, [])
+
   const runRef = useRef()
   const runningRef = useRef(false)
   const lastSignalRef = useRef(runSignal)

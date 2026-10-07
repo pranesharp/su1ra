@@ -316,6 +316,8 @@ export default function ChatView({ messages, status, streaming, showStats, onLoa
             <p>// everything runs on your machine</p>
             <p>// type /help for commands, or just start typing</p>
             <p>// before you begin: check /settings — pull models, pick an accent, tune your chat</p>
+            <p>// new here? /connect to start ollama → pull a model in /settings → /models &lt;name&gt; to start chatting</p>
+            <p>// use /code for best coding experiences</p>
             {status && !status.ok && (
               <>
                 <p className="warn">// cannot reach the ollama server — /settings to fix the url</p>

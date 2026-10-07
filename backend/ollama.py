@@ -19,6 +19,89 @@ def base_url():
     return url.rstrip("/")
 
 
+def engine_env():
+    """Extra env for a server Su1ra spawns, from the `engine` setting.
+
+    - auto: no overrides (Ollama picks; note it drops iGPUs unless asked).
+    - cpu: hide every GPU backend -> CPU inference.
+    - gpu: keep auto-detect but stop dropping integrated GPUs; Vulkan itself
+      is only forced when `engine_vulkan` is on (experimental, Intel/XPU).
+    """
+    engine = (get_setting("engine") or "auto").strip().lower()
+    if engine == "cpu":
+        return {
+            "CUDA_VISIBLE_DEVICES": "-1",
+            "HIP_VISIBLE_DEVICES": "-1",
+            "ROCR_VISIBLE_DEVICES": "-1",
+            "OLLAMA_VULKAN": "0",
+            "GGML_VK_VISIBLE_DEVICES": "-1",
+        }
+    if engine == "gpu":
+        env = {"OLLAMA_IGPU_ENABLE": "1"}
+        if get_setting("engine_vulkan") == "1":
+            env["OLLAMA_VULKAN"] = "1"
+        return env
+    return {}
+
+
+def _run_capture(cmd, timeout=8):
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        if proc.returncode == 0:
+            return proc.stdout.decode(errors="replace")
+    except Exception:
+        pass
+    return ""
+
+
+def detect_gpus():
+    """Best-effort GPU discovery for the settings UI. Never raises."""
+    info = {"nvidia": False, "nvidia_names": [], "vulkan": False, "intel": "", "amd": ""}
+    candidates = [["nvidia-smi", "-L"]]
+    if os.name == "nt":
+        candidates.append([r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe", "-L"])
+    for cmd in candidates:
+        names = [line.strip() for line in _run_capture(cmd).splitlines() if "GPU" in line]
+        if names:
+            info["nvidia"] = True
+            info["nvidia_names"] = names
+            break
+    try:
+        import ctypes.util
+
+        info["vulkan"] = (
+            ctypes.util.find_library("vulkan-1" if os.name == "nt" else "vulkan") is not None
+        )
+    except Exception:
+        pass
+    names = []
+    if os.name == "nt":
+        out = _run_capture(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
+            ],
+            timeout=12,
+        )
+        names = [line.strip() for line in out.splitlines() if line.strip()]
+    else:
+        out = _run_capture(["sh", "-c", "lspci 2>/dev/null | grep -iE 'vga|3d|display'"])
+        names = [line.strip() for line in out.splitlines() if line.strip()]
+    for name in names:
+        low = name.lower()
+        if "intel" in low and not info["intel"]:
+            info["intel"] = name
+        if ("amd" in low or "radeon" in low) and not info["amd"]:
+            info["amd"] = name
+    return info
+
+
+def has_spawned():
+    return _spawned_proc is not None and _spawned_proc.poll() is None
+
+
 _capabilities_cache = {}
 _ctx_cache = {}
 _spawned_proc = None
@@ -80,6 +163,35 @@ async def model_context_length(model):
     return ctx
 
 
+async def unload_model(model):
+    """Drop a loaded model from the server (free its memory).
+
+    Best-effort: a minimal 1-token chat with keep_alive 0 is used because it
+    validates on every Ollama version (unlike promptless bodies), then the
+    server unloads the model right after. Returns True when the server
+    accepted the unload.
+    """
+    if not model:
+        return False
+    base = base_url()
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{base}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": " "}],
+                    "stream": False,
+                    "keep_alive": 0,
+                    "think": False,
+                    "options": {"num_predict": 1},
+                },
+            )
+            return resp.status_code == 200
+    except Exception:
+        return False
+
+
 async def server_status():
     base = base_url()
     try:
@@ -127,6 +239,7 @@ async def ensure_running():
         stderr=subprocess.DEVNULL,
         start_new_session=(os.name != "nt"),
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        env={**os.environ, **engine_env()},
     )
     for _ in range(120):
         if (await server_status())["ok"]:
@@ -197,6 +310,20 @@ def normalize_think_param(think):
     return None
 
 
+def friendly_load_error(text):
+    """Map fatal llama-server load failures to an actionable message.
+
+    Returns the friendly string, or None when the error should pass through
+    verbatim (genuine server/config errors the user should see raw).
+    """
+    low = text.lower()
+    if any(k in low for k in ("killed", "out of memory", "out-of-memory", "oom", "cannot allocate", "not enough memory")):
+        return "model too large for this machine's memory — try a smaller variant, a lower quant, or reduce context length"
+    if any(k in low for k in ("startup failed", "failed to initialize", "failed to create")):
+        return "ollama couldn't start the model on this machine — usually out of memory: close other apps, lower the context length, or try a smaller model"
+    return None
+
+
 async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ctx=0, tools=None, think=None):
     base = base_url()
     payload_messages = (
@@ -228,9 +355,9 @@ async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ct
             async with client.stream("POST", f"{base}/api/chat", json=payload) as resp:
                 if resp.status_code != 200:
                     body = (await resp.aread()).decode(errors="replace")[:300]
-                    low = body.lower()
-                    if "killed" in low or "out of memory" in low or "oom" in low:
-                        yield {"error": "model too large for this machine's memory — try a smaller variant, a lower quant, or reduce context length"}
+                    friendly = friendly_load_error(body)
+                    if friendly:
+                        yield {"error": friendly}
                     else:
                         yield {"error": f"Ollama returned {resp.status_code}: {body}"}
                     return
@@ -244,11 +371,8 @@ async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ct
                     except json.JSONDecodeError:
                         continue
                     if "error" in obj:
-                        low = obj["error"].lower()
-                        if "killed" in low or "out of memory" in low or "oom" in low:
-                            yield {"error": "model too large for this machine's memory — try a smaller variant, a lower quant, or reduce context length"}
-                        else:
-                            yield {"error": obj["error"]}
+                        friendly = friendly_load_error(obj["error"])
+                        yield {"error": friendly or obj["error"]}
                         return
                     msg = obj.get("message") or {}
                     tool_calls = msg.get("tool_calls") or []

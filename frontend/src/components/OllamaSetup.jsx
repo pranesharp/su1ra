@@ -82,7 +82,23 @@ export default function OllamaSetup({ onResolved }) {
     setBusy(false)
   }
 
-  if (done || (state && state.server)) return null
+  const [dismissed, setDismissed] = useState(false)
+  if (dismissed) return null
+  // After a fresh install/start through this box, show next steps instead of
+  // vanishing — a new user otherwise lands on an empty chat with no model.
+  // (Server already running at launch → null as before, no nagging.)
+  if (done) {
+    return (
+      <div className="setup-box">
+        <p className="setup-hint">// ollama is ready — next:</p>
+        <p>// 1. pull a model in /settings ([ pull models ])</p>
+        <p>// 2. pick it in chat with /models &lt;name&gt;</p>
+        <p>// 3. /code for coding, /modes to see where you are</p>
+        <button className="btn-accent" onClick={() => setDismissed(true)}>[ start chatting ]</button>
+      </div>
+    )
+  }
+  if ((state && state.server)) return null
   if (!state) return null
 
   return (
@@ -116,7 +132,10 @@ export default function OllamaSetup({ onResolved }) {
               </div>
             )
           ) : (
-            <button className="btn-accent" onClick={install} disabled={busy}>[ install ollama ]</button>
+            <>
+              <button className="btn-accent" onClick={install} disabled={busy}>[ install ollama ]</button>
+              <p className="setup-hint">// if extraction fails, just click try again — then select your models in settings, then restart the app</p>
+            </>
           )}
         </>
       ) : (

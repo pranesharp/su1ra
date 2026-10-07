@@ -12,5 +12,8 @@ packaging/Su1ra-linux-x64.tar.gz
 packaging/dist/
 .abacusai/
 
+#debugging and ai help
+report/
+
 # bundled ollama server (installed via in-app setup)
 ollama/
