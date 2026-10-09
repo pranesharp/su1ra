@@ -107,9 +107,13 @@ function ModelSelect({ label, value, onChange, models }) {
   )
 }
 
-export default function SettingsModal({ status, conversation, accent, sandboxTools, model, models, loadout, view, onViewChange, bgBrightness, bgContrast, engine, engineVulkan, onSave, onClose, onOpenModels, onServerChanged }) {
+export default function SettingsModal({ status, conversation, accent, sandboxTools, model, models, loadout, view, onViewChange, bgBrightness, bgContrast, engine, engineVulkan, workspace, defaultSystemPrompt, onSave, onClose, onOpenModels, onServerChanged }) {
   const [ollamaUrl, setOllamaUrl] = useState(status?.url || 'http://localhost:11434')
-  const [systemPrompt, setSystemPrompt] = useState(conversation?.system_prompt || '')
+  // Show the EFFECTIVE prompt: per-chat when set, else the global default.
+  // Previously an empty box here made users think no prompt was applied
+  // (while the backend was sending the default all along).
+  const showingDefault = !(conversation?.system_prompt || '').trim()
+  const [systemPrompt, setSystemPrompt] = useState(conversation?.system_prompt || defaultSystemPrompt || '')
   const [temperature, setTemperature] = useState(conversation?.temperature ?? 0.7)
   const [ctxText, setCtxText] = useState(conversation?.context_length ? String(conversation.context_length) : '')
   const [selectedAccent, setSelectedAccent] = useState(accent || DEFAULT_ACCENT)
@@ -123,6 +127,18 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
   const [bgC, setBgC] = useState(bgContrast ?? DEFAULT_CONTRAST)
   const [engineSel, setEngineSel] = useState(['auto', 'cpu', 'gpu'].includes(engine) ? engine : 'auto')
   const [vulkanOn, setVulkanOn] = useState(engineVulkan === true)
+  // Workspace root commits on blur/Enter only — never debounced, so a
+  // half-typed absolute path can never become the live root mid-typing.
+  const [wsRootText, setWsRootText] = useState(workspace?.root || '')
+  const [wsMsg, setWsMsg] = useState('')
+  function commitWsRoot() {
+    const v = (wsRootText || '').trim()
+    if (!v || v === (workspace?.root || '')) return
+    setSaveState('saving')
+    onSaveRef.current({ workspaceRoot: v })
+      .then(() => { setSaveState('saved'); setWsMsg('// workspace root saved') })
+      .catch((err) => { setSaveState('error'); setWsMsg(`// ${err.message || 'invalid path'}`) })
+  }
   const [gpuInfo, setGpuInfo] = useState(null)
   const [restartMsg, setRestartMsg] = useState('')
   const [restartBusy, setRestartBusy] = useState(false)
@@ -436,6 +452,9 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
             onChange={(e) => setSystemPrompt(e.target.value)}
             placeholder="You are a helpful assistant."
           />
+          {showingDefault && (
+            <p className="prompt-note">// showing global default ({(defaultSystemPrompt || '').length} chars) — it is sent in code mode; saving writes to this chat + default</p>
+          )}
           <div className="prompt-actions">
             <button className="btn-ghost" onClick={openExternal}>[ edit in external editor ]</button>
             <button className="btn-ghost" onClick={resetDefault}>[ reset to default ]</button>
@@ -462,6 +481,19 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
             onChange={(e) => { setSandboxOn(e.target.checked); commitNow({ sandboxTools: e.target.checked }) }}
           />
           <span>Sandbox model-run code (no network, isolated filesystem — Linux only)</span>
+        </label>
+        <label>
+          <span>Workspace root (code mode files live here — model cannot leave it)</span>
+          <input
+            type="text"
+            spellCheck={false}
+            value={wsRootText}
+            placeholder="C:\Users\you\Documents\su1ra_projects"
+            onChange={(e) => { setWsRootText(e.target.value); setWsMsg('') }}
+            onBlur={commitWsRoot}
+            onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur() }}
+          />
+          <p className="prompt-note">// active project: {workspace?.project || '(none — /cd <name>)'} · /mkdir creates · /cd switches · saved on blur/Enter{wsMsg ? ` ${wsMsg}` : ''}</p>
         </label>
         <div className="hub-launch">
           <div className="hub-title">Need another model?</div>

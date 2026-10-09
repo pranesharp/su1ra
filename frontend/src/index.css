@@ -53,10 +53,60 @@ button {
   cursor: pointer;
 }
 
-.app {
+.window {
   display: flex;
+  flex-direction: column;
   height: 100vh;
   overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  box-sizing: border-box;
+}
+
+.app {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ---------- Borderless window chrome (no extra bar) ----------
+   The OS frame is gone (frameless). The window is just its own 1px
+   border; drag by the header, min/max/close live in the brand row. */
+
+.pywebview-drag-region {
+  -webkit-app-region: drag;
+}
+
+.tb-controls, .tb-btn {
+  -webkit-app-region: no-drag;
+}
+
+.tb-controls {
+  display: flex;
+  align-items: center;
+  margin-left: 4px;
+}
+
+.tb-btn {
+  width: 34px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  border-radius: 3px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.tb-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.tb-btn.tb-close:hover {
+  background: #e04a6e;
+  color: #fff;
 }
 
 /* ---------- Terminal buttons ---------- */
@@ -1499,6 +1549,14 @@ button {
 }
 .setup-hint {
   color: var(--accent);
+}
+.setup-trouble {
+  color: var(--accent-bright);
+  animation: trouble-pulse 1s ease-in-out infinite;
+}
+@keyframes trouble-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 
 /* user message hover actions + inline edit */

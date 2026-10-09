@@ -105,6 +105,113 @@ def has_spawned():
 _capabilities_cache = {}
 _ctx_cache = {}
 _spawned_proc = None
+_job = None
+
+
+def _assign_kill_on_close(proc):
+    """Windows: put a spawned `ollama serve` in a kill-on-close Job.
+
+    `ollama serve` forks llama-server.exe workers (one per loaded model,
+    gigabytes of RAM). Terminating the parent orphans them — they survive
+    Su1ra exits and crashes alike. With KILL_ON_JOB_CLOSE the OS reaps the
+    whole tree whenever this backend process ends, for any reason.
+    Best-effort: never raises.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        # Exact JOBOBJECT_EXTENDED_LIMIT_INFORMATION layout (x64 default
+        # packing: Basic 64 + IoInfo 48 + 4x8 = 144; verified against the
+        # OS — SetInformation rejects anything else).
+        class _BasicLimit(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", ctypes.c_uint32),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", ctypes.c_uint32),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", ctypes.c_uint32),
+                ("SchedulingClass", ctypes.c_uint32),
+            ]
+
+        class _IoCounters(ctypes.Structure):
+            _fields_ = [(f"f{i}", ctypes.c_ulonglong) for i in range(6)]
+
+        class _ExtLimit(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BasicLimit),
+                ("IoInfo", _IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        assert ctypes.sizeof(_ExtLimit) == 144, ctypes.sizeof(_ExtLimit)
+        kernel32 = ctypes.windll.kernel32
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return
+        info = _ExtLimit()
+        info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            job, 9, ctypes.byref(info), ctypes.sizeof(info)  # JobObjectExtendedLimitInformation
+        ):
+            kernel32.CloseHandle(job)
+            return
+        if not kernel32.AssignProcessToJobObject(job, int(proc._handle)):
+            kernel32.CloseHandle(job)
+            return
+        global _job
+        _job = job  # keep the handle open for backend lifetime
+        print("[su1ra] ollama in kill-on-close job", flush=True)
+    except Exception as exc:
+        print(f"[su1ra] job assign skipped: {exc}", flush=True)
+
+
+def _reap_children(parent_pid):
+    """Best-effort: kill llama-server/ollama processes parented to pid.
+
+    Belt & braces behind the Job object — covers the case where the parent
+    refuses terminate() but the backend itself keeps running. Scoped by
+    parent PID: never touches a foreign server's workers.
+    """
+    try:
+        if os.name == "nt":
+            out = _run_capture(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "Get-CimInstance Win32_Process -Filter "
+                    f"\"ParentProcessId={int(parent_pid)}\" | "
+                    "Where-Object { $_.Name -in @('llama-server.exe','ollama.exe') } | "
+                    "Select-Object -ExpandProperty ProcessId",
+                ],
+                timeout=15,
+            )
+            for line in out.splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    subprocess.run(["taskkill", "/F", "/PID", line], capture_output=True)
+        else:
+            import signal
+
+            try:
+                os.killpg(int(parent_pid), signal.SIGTERM)
+                time.sleep(1)
+            except Exception:
+                pass
+            try:
+                os.killpg(int(parent_pid), signal.SIGKILL)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 async def model_supports_tools(model):
@@ -241,6 +348,7 @@ async def ensure_running():
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         env={**os.environ, **engine_env()},
     )
+    _assign_kill_on_close(_spawned_proc)
     for _ in range(120):
         if (await server_status())["ok"]:
             return {"ok": True, "started": True, "url": base}
@@ -258,6 +366,7 @@ def stop_spawned():
     proc, _spawned_proc = _spawned_proc, None
     if proc is None or proc.poll() is not None:
         return False
+    pid = proc.pid
     try:
         proc.terminate()
         proc.wait(timeout=5)
@@ -266,6 +375,9 @@ def stop_spawned():
             proc.kill()
         except Exception:
             pass
+    # The parent is down but its llama-server workers may linger —
+    # reap by parent PID (scoped; never touches a foreign server).
+    _reap_children(pid)
     return True
 
 

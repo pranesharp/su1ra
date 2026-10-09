@@ -1,9 +1,9 @@
-export default function ArtifactPane({ width, code, tab, onTab, onClose, onDownload }) {
+export default function ArtifactPane({ width, code, tab, onTab, onClose, onDownload, path }) {
   return (
     <aside className="ide-pane" style={{ width }}>
       <div className="ide-head">
         <span className="hash">#</span>
-        <span className="ide-title">artifact</span>
+        <span className="ide-title">{path ? path : 'artifact'}</span>
         <span style={{ flex: 1 }} />
         <button className={'term-btn' + (tab === 'preview' ? ' on' : '')} onClick={() => onTab('preview')}>
           preview

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 import httpx
@@ -21,6 +21,7 @@ import ollama_setup
 import puller
 import runner
 import store
+import workspace
 
 if os.name == "posix":
     import ptyrunner
@@ -72,8 +73,99 @@ TOOLS = [
                 "required": ["code"],
             },
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ws_ls",
+            "description": "List a workspace directory (default: active project). Paths are relative to the active project; ../sibling inside the workspace is allowed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory to list (default: active project)"}
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ws_read",
+            "description": "Read a text file from the workspace. Always read a file before editing it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path relative to the active project"}
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ws_write",
+            "description": "Create or overwrite a text file in the workspace. For changes to an existing file prefer ws_edit.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path relative to the active project"},
+                    "content": {"type": "string", "description": "Full file content"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ws_edit",
+            "description": "Replace one exact anchor string in a workspace file. The anchor must match exactly once — check the match count in the result.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path relative to the active project"},
+                    "find": {"type": "string", "description": "Exact anchor text, copied from ws_read"},
+                    "replacement": {"type": "string", "description": "New text"},
+                },
+                "required": ["path", "find", "replacement"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ws_mkdir",
+            "description": "Create a folder at the workspace root (e.g. a new project). Cannot create anything outside the root.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Folder to create, e.g. project_1"}
+                },
+                "required": ["path"],
+            },
+        },
+    },
 ]
+
+
+def format_ws_result(res):
+    """One-line-ish human text for a workspace tool result dict."""
+    if not res.get("ok"):
+        return f"[denied/error: {res.get('error')}]"
+    if "entries" in res:
+        if not res["entries"]:
+            return f"[{res['path'] or '.'}/ — empty]"
+        lines = [f"[{(d['name'] + '/') if d['dir'] else d['name']}" + ("" if d["dir"] else f" ({d['size']}b)") + "]" for d in res["entries"]]
+        return f"[{res['path'] or '.'}/]\n" + "\n".join(lines)
+    if "content" in res:
+        note = f" ({res['chars']} chars total, truncated)" if res.get("truncated") else f" ({res['chars']} chars)"
+        return f"[{res['path']}{note}]\n{res['content']}"
+    if "replaced" in res:
+        return f"[edited {res['path']}: 1 anchor replaced]"
+    if "exists" in res:
+        return f"[folder {res['path']}" + (" — already existed]" if res["exists"] else " — created]")
+    return f"[{res.get('path', 'ok')}: {res.get('chars', 0)} chars written]"
 
 
 def build_history(rows):
@@ -207,6 +299,8 @@ class SettingsUpdate(BaseModel):
     settings_view: str | None = None
     engine: str | None = None
     engine_vulkan: bool | None = None
+    workspace_root: str | None = None
+    active_project: str | None = None
 
 
 class RunRequest(BaseModel):
@@ -412,6 +506,8 @@ async def get_settings():
         "settings_view": store.get_setting("settings_view") or "split",
         "engine": store.get_setting("engine") or "auto",
         "engine_vulkan": store.get_setting("engine_vulkan") == "1",
+        "workspace_root": str(workspace.root()),
+        "active_project": workspace.active_project(),
     }
 
 
@@ -438,6 +534,8 @@ async def update_settings(body: SettingsUpdate):
         and body.settings_view is None
         and body.engine is None
         and body.engine_vulkan is None
+        and body.workspace_root is None
+        and body.active_project is None
     ):
         raise HTTPException(422, "nothing to update")
     if body.default_think is not None:
@@ -502,6 +600,19 @@ async def update_settings(body: SettingsUpdate):
         if not 280 <= body.ide_width <= 1200:
             raise HTTPException(422, "ide_width must be between 280 and 1200")
         store.set_setting("ide_width", str(body.ide_width))
+    if body.workspace_root is not None:
+        try:
+            store.set_setting("workspace_root", workspace.validate_root(body.workspace_root))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+    if body.active_project is not None:
+        if body.active_project.strip() == "":
+            store.set_setting("active_project", "")
+        else:
+            try:
+                workspace.set_active_project(body.active_project)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc))
     return {
         "ok": True,
         "ollama_url": store.get_setting("ollama_url") or ollama.DEFAULT_URL,
@@ -665,17 +776,59 @@ async def chat(body: ChatRequest):
     if not conversation["title"]:
         store.update_conversation(body.conversation_id, title=content[:60])
     history = build_history(store.get_messages(body.conversation_id))
-    tools = TOOLS if body.tools and await ollama.model_supports_tools(model) else None
+    # Tools are strictly code-mode: casual never offers them, no matter what
+    # the client asked for. (The old ```python auto-arm is gone on purpose.)
+    tools = TOOLS if body.tools and body.code_mode and await ollama.model_supports_tools(model) else None
     think = body.think if body.think is not None else conversation.get("think")
     # The stored system prompt only applies in code mode — casual chats
     # go out with no system prompt.
     sys_prompt = conversation["system_prompt"] if body.code_mode else ""
     if tools:
+        ws_rules = (
+            f"Workspace: ROOT={workspace.root()} PROJECT={workspace.project_dir()}. "
+            "File tools (ws_ls/read/write/edit/mkdir) resolve inside ROOT only — "
+            "paths relative to PROJECT, never absolute. Read a file before editing it; "
+            "ws_edit needs an anchor matching exactly once (check the match count). "
+            "One edit per call. Never paste file contents into chat — confirm in one line. "
+            "If a tool says denied, stop and ask the user in plain words; never retry paths. "
+            "Artifacts you build live as files in PROJECT (single-file HTML runs as saved); "
+            "mention the file path instead of re-emitting content. "
+            "When the user asks about files, directories, or project contents, you MUST "
+            "call ws_ls/ws_read first — answering from memory or refusing without calling "
+            "is a failure. Greetings need no tools."
+        )
         directive = (
-            "You have the run_python tool. Use it proactively whenever the task involves "
-            "computation, running code, or checking output — call it instead of guessing results."
+            "You have file tools plus run_python. Use them proactively for computation, "
+            "running code, and file work — call them instead of guessing results. " + ws_rules
         )
         sys_prompt = f"{sys_prompt}\n\n{directive}" if sys_prompt.strip() else directive
+        # Auto-context (always): the model sees the live project listing every
+        # code-mode turn, so "I can't see your files" refusals contradict
+        # visible context. Best-effort and silent — a failure here must never
+        # break the turn.
+        try:
+            if workspace.active_project():
+                ls_res = workspace.ls("")
+                if ls_res.get("ok"):
+                    entries = ls_res["entries"][:60]
+                    lines = [
+                        (e["name"] + "/") if e["dir"] else f"{e['name']} ({e['size']}b)"
+                        for e in entries
+                    ]
+                    if len(ls_res["entries"]) > 60:
+                        lines.append(f"...(+{len(ls_res['entries']) - 60} more — ws_ls to see all)")
+                    listing = "\n".join(lines) if lines else "(empty project — ws_write to create files)"
+                    sys_prompt += (
+                        f"\n\n[project {workspace.active_project()} contents — "
+                        "you CAN read these with ws_read]\n" + listing
+                    )
+            else:
+                sys_prompt += (
+                    "\n\n[no active project — if the user wants file work, tell them "
+                    "to /mkdir a project and /cd into it first]"
+                )
+        except Exception:
+            pass
 
     async def generator():
         yield json.dumps({"user_id": user_row["id"]}) + "\n"
@@ -745,20 +898,42 @@ async def chat(body: ChatRequest):
             for call in finalized:
                 name = call["function"]["name"]
                 arguments = call["function"]["arguments"]
+                if not isinstance(arguments, dict):
+                    arguments = {}
                 code = str(arguments.get("code") or "") if name == "run_python" else ""
+                ws_path = str(arguments.get("path") or "")
                 yield json.dumps({"tool_start": {"name": name}}) + "\n"
-                if name != "run_python":
-                    result = None
-                    result_text = f"Unknown tool: {name}. The only available tool is run_python."
-                else:
+                if name == "run_python":
                     try:
                         result = await runner.run_python(
-                            code, sandboxed=store.get_setting("sandbox_tools") != "0"
+                            code,
+                            sandboxed=store.get_setting("sandbox_tools") != "0",
+                            cwd=str(workspace.project_dir()),
                         )
                         result_text = tool_result_text(result)
                     except Exception as exc:
                         result = None
                         result_text = f"[execution error: {exc}]"
+                elif name in ("ws_ls", "ws_read", "ws_write", "ws_edit", "ws_mkdir"):
+                    try:
+                        if name == "ws_ls":
+                            ws_res = workspace.ls(ws_path)
+                        elif name == "ws_read":
+                            ws_res = workspace.read(ws_path)
+                        elif name == "ws_write":
+                            ws_res = workspace.write(ws_path, arguments.get("content") or "")
+                        elif name == "ws_edit":
+                            ws_res = workspace.edit(ws_path, arguments.get("find") or "", arguments.get("replacement") or "")
+                        else:
+                            ws_res = workspace.mkdir(ws_path)
+                        result = {"exit": 0 if ws_res.get("ok") else 1, "ws": ws_res}
+                        result_text = format_ws_result(ws_res)
+                    except Exception as exc:
+                        result = None
+                        result_text = f"[workspace error: {exc}]"
+                else:
+                    result = None
+                    result_text = f"Unknown tool: {name}. Available: run_python, ws_ls, ws_read, ws_write, ws_edit, ws_mkdir."
                 row = store.add_message(body.conversation_id, "tool", result_text)
                 working.append({"role": "tool", "content": result_text})
                 yield json.dumps(
@@ -766,6 +941,7 @@ async def chat(body: ChatRequest):
                         "tool": {
                             "name": name,
                             "code": code,
+                            "path": ws_path if name.startswith("ws_") else "",
                             "output": result_text,
                             "id": row["id"],
                             "exit": result["exit"] if result else None,
@@ -988,6 +1164,38 @@ def _inject_tag(html: str, tag: str, anchor: str, skip_pattern: str) -> str:
     return html + "\n" + tag if anchor == r"</body\s*>" else tag + "\n" + html
 
 
+class WorkspaceMkdirBody(BaseModel):
+    path: str
+
+
+@app.post("/api/workspace/mkdir")
+async def workspace_mkdir(body: WorkspaceMkdirBody):
+    res = workspace.mkdir(body.path)
+    if not res.get("ok"):
+        raise HTTPException(422, res.get("error"))
+    return {"ok": True, **res}
+
+
+@app.get("/api/workspace/read")
+async def workspace_read(path: str = ""):
+    """Scoped file read for the artifact preview bridge."""
+    res = workspace.read(path)
+    if not res.get("ok"):
+        raise HTTPException(422 if "denied" in res.get("error", "") else 404, res.get("error"))
+    return res
+
+
+@app.get("/api/workspace/ls")
+async def workspace_ls(path: str = ""):
+    try:
+        res = workspace.ls(path)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    if not res.get("ok"):
+        raise HTTPException(404, res.get("error"))
+    return res
+
+
 @app.post("/api/download")
 async def download_artifact(body: DownloadBody):
     css = (body.css or "").strip()
@@ -1052,8 +1260,45 @@ async def spa(full_path: str):
     if DIST.is_dir():
         candidate = (DIST / full_path).resolve()
         if candidate.is_file() and str(candidate).startswith(str(DIST.resolve())):
+            if candidate.name == "index.html":
+                return serve_index()
             return FileResponse(candidate)
         index = DIST / "index.html"
         if index.is_file():
-            return FileResponse(index)
+            return serve_index()
     raise HTTPException(404, "Not found")
+
+
+def serve_index():
+    """Serve index.html with the saved theme stamped in.
+
+    React boots with hardcoded defaults and only applies the saved
+    accent/brightness after /api/settings lands — a visible flash.
+    Inlining the DB values as window.__SU1RA_THEME__ lets the first
+    paint already use them (App.jsx reads it for initial state).
+    """
+    html = (DIST / "index.html").read_text(encoding="utf-8")
+    accent = (store.get_setting("accent") or "#bf264a").strip().lower()
+    if not re.fullmatch(r"#[0-9a-f]{6}", accent):
+        accent = "#bf264a"
+
+    def _int(key, default, lo, hi):
+        try:
+            return max(lo, min(hi, int(store.get_setting(key) or default)))
+        except (TypeError, ValueError):
+            return default
+
+    theme = (
+        "<script>window.__SU1RA_THEME__="
+        + json.dumps({
+            "accent": accent,
+            "bg_brightness": _int("bg_brightness", 100, 0, 150),
+            "bg_contrast": _int("bg_contrast", 100, 0, 150),
+        })
+        + ";</script>"
+    )
+    if "</head>" in html:
+        html = html.replace("</head>", theme + "</head>", 1)
+    else:
+        html = theme + html
+    return HTMLResponse(html)

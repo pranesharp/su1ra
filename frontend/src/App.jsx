@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from './api'
-import { applyAccent, applyBackground, DEFAULT_ACCENT, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST } from './theme'
+import { applyAccent, applyBackground, DEFAULT_ACCENT, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, readInjectedTheme } from './theme'
 import ChatView, { splitThinking } from './components/ChatView.jsx'
 import Composer from './components/Composer.jsx'
 import Logo from './components/Logo.jsx'
 import SettingsModal from './components/SettingsModal.jsx'
 import ModelHub from './components/ModelHub.jsx'
 import IdePane from './components/IdePane.jsx'
+import WindowControls from './components/TitleBar.jsx'
 import ArtifactPane from './components/ArtifactPane.jsx'
 import { copyText } from './clip'
 
@@ -26,6 +27,8 @@ const COMMANDS = [
   { cmd: '/casual', desc: 'switch to casual mode — everyday chat model, unloads the code model, tools off' },
   { cmd: '/modes', desc: 'show current mode — casual/code plus model, ctx, think, tools' },
   { cmd: '/ide', desc: 'toggle the python ide pane' },
+  { cmd: '/mkdir', desc: 'new project folder in the workspace — /mkdir <name>' },
+  { cmd: '/cd', desc: 'switch active project — /cd <name>, or bare /cd to show root + project' },
 ]
 
 const STARTER_CODE = `# scratch — runs in ~/.local/share/su1ra/scratch
@@ -41,15 +44,27 @@ export default function App() {
   const [models, setModels] = useState([])
   const [status, setStatus] = useState(null)
   const refreshStatus = useCallback(async () => {
-    setStatus(await api.getStatus())
+    // Status AND models: both are fetched once at boot (often while the
+    // server is still coming up), so every refresh reloads both — otherwise
+    // the loadout dropdowns lie stuck on "no models on device".
+    try {
+      setStatus(await api.getStatus())
+    } catch { /* backend hiccup: keep last known */ }
+    try {
+      const r = await api.getModels()
+      setModels(r.models)
+    } catch { /* same: keep last known list */ }
   }, [])
   const [selectedModel, setSelectedModel] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [modelHubOpen, setModelHubOpen] = useState(false)
-  const [accent, setAccent] = useState(DEFAULT_ACCENT)
-  const [bgBrightness, setBgBrightness] = useState(DEFAULT_BRIGHTNESS)
-  const [bgContrast, setBgContrast] = useState(DEFAULT_CONTRAST)
+  // First paint uses the theme the backend stamped into index.html
+  // (window.__SU1RA_THEME__) — no flash of the hardcoded defaults.
+  // useState initializer form so it reads exactly once.
+  const [accent, setAccent] = useState(() => readInjectedTheme().accent || DEFAULT_ACCENT)
+  const [bgBrightness, setBgBrightness] = useState(() => readInjectedTheme().bgBrightness ?? DEFAULT_BRIGHTNESS)
+  const [bgContrast, setBgContrast] = useState(() => readInjectedTheme().bgContrast ?? DEFAULT_CONTRAST)
   const [showStats, setShowStats] = useState(false)
   const [ideOpen, setIdeOpen] = useState(false)
   const [ideWidth, setIdeWidth] = useState(460)
@@ -57,6 +72,8 @@ export default function App() {
   const [ideOutput, setIdeOutput] = useState({ text: '', exitCode: null })
   const [artifact, setArtifact] = useState(null)
   const [artifactTab, setArtifactTab] = useState('preview')
+  const [artifactPath, setArtifactPath] = useState(null)
+  const [workspace, setWorkspace] = useState({ root: '', project: '' })
   const [codeArmed, setCodeArmed] = useState(false)
   const [sandboxTools, setSandboxTools] = useState(true)
   const [loadout, setLoadout] = useState({ casualModel: '', codeModel: '', casualCtx: 0, codeCtx: 0, casualThink: 'off' })
@@ -66,6 +83,11 @@ export default function App() {
   const abortRef = useRef(null)
   const modelPullRef = useRef(null)
   const pendingToolRef = useRef(null)
+  // Deltas/stats must target the streaming assistant message BY ID, never by
+  // position: mid-stream system lines (background unload notes, tool status)
+  // would otherwise hijack following tokens into the wrong bubble and even
+  // break think-tag parsing with glued text.
+  const streamTargetRef = useRef(null)
   const ideRunSeenRef = useRef(null)
   const [runSignal, setRunSignal] = useState(0)
   const idRef = useRef(1000)
@@ -244,6 +266,7 @@ export default function App() {
       setIdeOpen(settingsRes.ide_open === true)
       setIdeWidth(typeof settingsRes.ide_width === 'number' ? settingsRes.ide_width : 460)
       setSandboxTools(settingsRes.sandbox_tools !== false)
+      setWorkspace({ root: settingsRes.workspace_root || '', project: settingsRes.active_project || '' })
       setModels(modelsRes.models)
       setConversations(convsRes.conversations)
       // Startup is always a fresh casual desk: no chat selected (history stays
@@ -329,13 +352,26 @@ export default function App() {
     }
   }
 
+  // Fire-and-forget model eviction: the unload round-trip (up to a 60 s
+  // server timeout under memory pressure) used to block the whole mode
+  // switch with zero feedback. Now the switch lands instantly and the
+  // eviction reports back if it actually freed anything. Idempotent, so
+  // rapid toggling is safe.
+  function unloadInBackground(oldName, newName) {
+    if (!oldName || !newName || oldName === newName) return
+    unloadIfSwitching(oldName, newName).then((unloaded) => {
+      if (unloaded) pushSystem(`// freed ${oldName} from memory`)
+    })
+  }
+
   // Leaving code mode = entering casual: restore the casual loadout
-  // (model + ctx), disarm tools. Startup lands here too (codeArmed=false).
+  // (model + ctx), disarm tools. Eviction runs in the background so the
+  // switch itself is instant (see above).
   async function leaveCodeMode(echo) {
     const currentCtx = activeConversation?.context_length ?? chatDefaultsRef.current.context_length ?? 0
     const casualModel = loadout.casualModel || selectedModel
     const oldModel = activeConversation?.model || selectedModel
-    const unloaded = await unloadIfSwitching(oldModel, casualModel)
+    unloadInBackground(oldModel, casualModel)
     const newCtx = loadout.casualCtx || currentCtx
     await applyModelCtx(casualModel, newCtx)
     if (loadout.casualCtx) {
@@ -343,7 +379,7 @@ export default function App() {
     }
     setCodeArmed(false)
     pushSystem(
-      `${echo}\n\n// casual mode — model ${casualModel || '(unchanged)'}${unloaded ? ` · unloaded ${oldModel}` : ''} · ctx ${newCtx} · think ${loadout.casualThink === 'on' ? 'on' : 'off'} · tools off`,
+      `${echo}\n\n// casual mode — model ${casualModel || '(unchanged)'} · ctx ${newCtx} · think ${loadout.casualThink === 'on' ? 'on' : 'off'} · tools off`,
     )
   }
 
@@ -627,6 +663,40 @@ export default function App() {
       return
     }
 
+    if (cmd === '/mkdir') {
+      const name = arg.trim()
+      if (!name) {
+        pushSystem(`${echo}\n\n// usage: /mkdir <name> — e.g. /mkdir project_1 (created in the workspace root)`)
+        return
+      }
+      try {
+        const res = await api.mkdirWorkspace(name)
+        pushSystem(`${echo}\n\n// folder ${res.exists ? 'already exists' : 'created'}: ${res.path}`)
+      } catch (err) {
+        pushSystem(`${echo}\n\n// ${err.message}`)
+      }
+      return
+    }
+
+    if (cmd === '/cd') {
+      const name = arg.trim()
+      if (!name) {
+        const s = await api.getSettings()
+        setWorkspace({ root: s.workspace_root || '', project: s.active_project || '' })
+        pushSystem(`${echo}\n\n// root: ${s.workspace_root || '(unset)'}\n// project: ${s.active_project || '(none — /cd <name>)'}`)
+        return
+      }
+      try {
+        await api.saveSettings({ active_project: name })
+        const s = await api.getSettings()
+        setWorkspace({ root: s.workspace_root || '', project: s.active_project || '' })
+        pushSystem(`${echo}\n\n// project: ${s.active_project} (root: ${s.workspace_root})`)
+      } catch (err) {
+        pushSystem(`${echo}\n\n// ${err.message}`)
+      }
+      return
+    }
+
     if (cmd === '/code') {
       const rest = arg
       if (rest) {
@@ -636,11 +706,17 @@ export default function App() {
         const next = !codeArmed
         const currentCtx = activeConversation?.context_length ?? chatDefaultsRef.current.context_length ?? 0
         if (next) {
-          // entering code mode: code loadout model + code ctx (at least 50000) + ide open
+          // entering code mode: code loadout model + code ctx (at least 50000) + ide open.
+          // State flips FIRST so the switch is instant; the slow model
+          // eviction runs in the background (see unloadInBackground).
           const codeModel = loadout.codeModel || selectedModel
           const oldModel = activeConversation?.model || selectedModel
-          const unloaded = await unloadIfSwitching(oldModel, codeModel)
           const newCtx = Math.max(currentCtx, loadout.codeCtx || 50000)
+          setCodeArmed(true)
+          pushSystem(
+            `${echo}\n\n// code mode: on — model ${codeModel || '(none selected)'} · ctx ${newCtx} · think on · ide open (persists until /code or /casual, off on restart)`,
+          )
+          unloadInBackground(oldModel, codeModel)
           await applyModelCtx(codeModel, newCtx)
           await api.saveSettings({ default_context_length: newCtx, loadout_code_ctx: newCtx })
           setLoadout((l) => ({ ...l, codeCtx: newCtx }))
@@ -648,10 +724,6 @@ export default function App() {
             setIdeOpen(true)
             await api.saveSettings({ ide_open: true })
           }
-          setCodeArmed(true)
-          pushSystem(
-            `${echo}\n\n// code mode: on — model ${codeModel || '(none selected)'}${unloaded ? ` · unloaded ${oldModel}` : ''} · ctx ${newCtx} · think on · ide open (persists until /code or /casual, off on restart)`,
-          )
         } else {
           await leaveCodeMode(echo)
         }
@@ -675,7 +747,7 @@ export default function App() {
       const effThink =
         activeConversation?.think ?? (codeArmed ? 'on' : loadout.casualThink === 'on' ? 'on' : 'off')
       pushSystem(
-        `${echo}\n\n// mode: ${mode}\n// model: ${effModel} (casual loadout: ${loadout.casualModel || '—'} · code loadout: ${loadout.codeModel || '—'})\n// ctx: ${effCtx} · think: ${effThink || 'auto'} · tools: ${codeArmed ? 'armed' : 'off'} · sysprompt: ${codeArmed ? 'on (code mode)' : 'off (casual)'} · engine: ${engine}${engine === 'gpu' && engineVulkan ? '+vulkan' : ''}`,
+        `${echo}\n\n// mode: ${mode}\n// model: ${effModel} (casual loadout: ${loadout.casualModel || '—'} · code loadout: ${loadout.codeModel || '—'})\n// ctx: ${effCtx} · think: ${effThink || 'auto'} · tools: ${codeArmed ? 'armed' : 'off'} · sysprompt: ${codeArmed ? 'on (code mode)' : 'off (casual)'} · engine: ${engine}${engine === 'gpu' && engineVulkan ? '+vulkan' : ''}\n// workspace: ${workspace.root || '(unset)'}${workspace.project ? ` · project: ${workspace.project}` : ''}`,
       )
       return
     }
@@ -703,7 +775,9 @@ export default function App() {
       return
     }
     const outgoing = attachIdeRun(trimmed)
-    const arm = opts.forceArmed === true || codeArmed || /```python\n/.test(outgoing)
+    // Tools are strictly code-mode. The old ```python auto-arm is gone:
+    // casual promises "tools off" and means it.
+    const arm = opts.forceArmed === true || codeArmed
     const codeMode = opts.forceArmed === true || codeArmed
     if (!selectedModel) return
     // think: explicit per-chat /think wins; otherwise code mode is fixed on,
@@ -719,6 +793,7 @@ export default function App() {
     const userMsg = { id: -++idRef.current, role: 'user', content: outgoing }
     const assistantMsg = { id: -++idRef.current, role: 'assistant', content: '' }
     setMessages((prev) => [...prev, userMsg, assistantMsg])
+    streamTargetRef.current = assistantMsg.id
     setStreaming(true)
     const controller = new AbortController()
     abortRef.current = controller
@@ -731,21 +806,25 @@ export default function App() {
           onUserId: (dbId) =>
             setMessages((prev) => prev.map((m) => (m.id === userMsg.id ? { ...m, id: dbId } : m))),
           onDone: (obj) => {
-            if (obj?.assistant_id)
+            if (obj?.assistant_id) {
               setMessages((prev) =>
                 prev.map((m) => (m.id === assistantMsg.id ? { ...m, id: obj.assistant_id } : m)),
               )
+              if (streamTargetRef.current === assistantMsg.id) streamTargetRef.current = obj.assistant_id
+            }
           },
           onDelta: (delta) => {
             partial += delta
+            const target = streamTargetRef.current
             setMessages((prev) =>
-              prev.map((m, i) => (i === prev.length - 1 ? { ...m, content: m.content + delta } : m)),
+              prev.map((m) => (m.id === target ? { ...m, content: m.content + delta } : m)),
             )
           },
           onStats: (s) => {
             replyStats = s
+            const target = streamTargetRef.current
             setMessages((prev) =>
-              prev.map((m, i) => (i === prev.length - 1 ? { ...m, stats: s } : m)),
+              prev.map((m) => (m.id === target ? { ...m, stats: s } : m)),
             )
           },
           onToolStart: (t) => {
@@ -757,14 +836,20 @@ export default function App() {
             const nextAssistantId = ++idRef.current
             setMessages((prev) => {
               const base = prev.filter((m) => m.id !== pendingToolRef.current)
+              // Attach to the last ASSISTANT message by role, not position —
+              // a mid-stream system line may sit after it.
+              let targetIdx = -1
+              for (let i = base.length - 1; i >= 0; i--) {
+                if (base[i].role === 'assistant') { targetIdx = i; break }
+              }
               const next = base.map((m, i) =>
-                i === base.length - 1 && m.role === 'assistant'
+                i === targetIdx
                   ? {
                       ...m,
                       content: t.replaces_text ? '' : m.content,
                       tool_calls: [
                         ...(m.tool_calls || []),
-                        { function: { name: t.name, arguments: { code: t.code } } },
+                        { function: { name: t.name, arguments: { code: t.code, path: t.path || '' } } },
                       ],
                     }
                   : m,
@@ -773,6 +858,13 @@ export default function App() {
               next.push({ id: nextAssistantId, role: 'assistant', content: '' })
               return next
             })
+            streamTargetRef.current = nextAssistantId
+            // Artifact bridge: an .html file the model wrote/edited opens
+            // (or refreshes) in the preview pane instead of flooding chat.
+            if ((t.name === 'ws_write' || t.name === 'ws_edit') && (t.exit === 0 || t.exit === null)) {
+              const p = t.path || ''
+              if (/\.html?$/i.test(p)) refreshFilePreview(p)
+            }
           },
           onError: (error) => {
             if (!partial) {
@@ -791,6 +883,7 @@ export default function App() {
     } finally {
       setStreaming(false)
       abortRef.current = null
+      streamTargetRef.current = null
     }
     const visible = splitThinking(partial)
       .filter((p) => !p.think)
@@ -844,12 +937,30 @@ export default function App() {
     return last
   }
 
-  function openArtifact(code) {
+  function openArtifact(code, path = null) {
     setArtifact(code)
+    setArtifactPath(path)
     setArtifactTab('preview')
     if (!ideOpen) {
       setIdeOpen(true)
       api.saveSettings({ ide_open: true })
+    }
+  }
+
+  // File-backed preview: (re)load a workspace .html into the artifact pane.
+  async function refreshFilePreview(path) {
+    try {
+      const res = await api.readWorkspaceFile(path)
+      setArtifact(res.content)
+      setArtifactPath(res.path)
+      // note: tab untouched on refresh — your preview/code tab survives edits
+      if (!ideOpen) {
+        setIdeOpen(true)
+        api.saveSettings({ ide_open: true })
+      }
+      pushSystem(`// preview: ${res.path}`)
+    } catch (err) {
+      pushSystem(`// preview failed for ${path}: ${err.message}`)
     }
   }
 
@@ -864,6 +975,7 @@ export default function App() {
 
   function loadToIde(code) {
     setArtifact(null)
+    setArtifactPath(null)
     setIdeCode(code)
     if (!ideOpen) {
       setIdeOpen(true)
@@ -874,6 +986,7 @@ export default function App() {
 
   function runInIde(code) {
     setArtifact(null)
+    setArtifactPath(null)
     setIdeCode(code)
     if (!ideOpen) {
       setIdeOpen(true)
@@ -946,7 +1059,7 @@ export default function App() {
     window.addEventListener('mouseup', onUp)
   }
 
-  async function saveSettings({ ollamaUrl, systemPrompt, temperature, contextLength, accent: newAccent, sandboxTools: sandboxPref, loadoutCasualModel, loadoutCodeModel, loadoutCasualCtx, loadoutCodeCtx, loadoutCasualThink, bgBrightness: newBrightness, bgContrast: newContrast, engine: newEngine, engineVulkan: vulkanPref }) {
+  async function saveSettings({ ollamaUrl, systemPrompt, temperature, contextLength, accent: newAccent, sandboxTools: sandboxPref, loadoutCasualModel, loadoutCodeModel, loadoutCasualCtx, loadoutCodeCtx, loadoutCasualThink, bgBrightness: newBrightness, bgContrast: newContrast, engine: newEngine, engineVulkan: vulkanPref, workspaceRoot, activeProject }) {
     // Autosaved on every change (no Save button) — stay open, skip invalid
     // mid-typing values instead of failing the whole patch.
     const url = (ollamaUrl || '').trim()
@@ -970,7 +1083,13 @@ export default function App() {
       ...(newContrast === undefined ? {} : { bg_contrast: newContrast }),
       ...(newEngine === undefined ? {} : { engine: newEngine }),
       ...(vulkanPref === undefined ? {} : { engine_vulkan: vulkanPref }),
+      ...(workspaceRoot === undefined ? {} : { workspace_root: workspaceRoot }),
+      ...(activeProject === undefined ? {} : { active_project: activeProject }),
     })
+    if (workspaceRoot !== undefined || activeProject !== undefined) {
+      const s = await api.getSettings()
+      setWorkspace({ root: s.workspace_root || '', project: s.active_project || '' })
+    }
     if (newEngine !== undefined) setEngine(newEngine)
     if (vulkanPref !== undefined) setEngineVulkan(vulkanPref)
     if (loadoutCasualModel !== undefined || loadoutCodeModel !== undefined || loadoutCasualCtx !== undefined || loadoutCodeCtx !== undefined || loadoutCasualThink !== undefined) {
@@ -1013,17 +1132,26 @@ export default function App() {
     await api.saveSettings({ settings_view: view })
   }
 
+  // Double-click on the header (not on buttons/inputs) toggles maximize.
+  const onHeaderDouble = (e) => {
+    if (e.target.closest && (e.target.closest('.tb-controls') || e.target.closest('button') || e.target.closest('input'))) return
+    try { window?.pywebview?.api?.toggle_maximize?.() } catch { /* browser dev */ }
+  }
+
   return (
-    <div className="app">
+    <div className="window">
+      <div className="app">
       <main className="main">
-        <header className="app-header">
+        <header className="app-header pywebview-drag-region" onDoubleClick={onHeaderDouble}>
           <div className="brand-line">
             <Logo size={20} />
             <span className="brand">Su1ra</span>
-            <span className="brand-ver">v0.2.0</span>
+            <span className="brand-ver">v0.3.0</span>
             <span className={`status-tag${status?.ok ? ' ok' : ''}`}>
               [{status?.ok ? 'ok' : 'offline'}]
             </span>
+            <span style={{ flex: 1 }} />
+            <WindowControls />
           </div>
           <div className="chat-meta">
             <span className="hash">#</span>
@@ -1041,6 +1169,7 @@ export default function App() {
             <ArtifactPane
               width={ideWidth}
               code={artifact}
+              path={artifactPath}
               tab={artifactTab}
               onTab={setArtifactTab}
               onClose={closeIde}
@@ -1076,6 +1205,8 @@ export default function App() {
             onServerChanged={refreshStatus}
             accent={accent}
             sandboxTools={sandboxTools}
+            workspace={workspace}
+            defaultSystemPrompt={chatDefaultsRef.current.system_prompt || ''}
             onSave={saveSettings}
             onClose={() => setSettingsOpen(false)}
             onOpenModels={() => { setSettingsOpen(false); setModelHubOpen(true) }}
@@ -1095,6 +1226,7 @@ export default function App() {
           </button>
         </div>
       )}
+      </div>
     </div>
   )
 }

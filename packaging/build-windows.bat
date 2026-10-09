@@ -15,7 +15,11 @@ popd
 .venv\Scripts\pyinstaller packaging\su1ra.spec --noconfirm --distpath packaging\dist --workpath packaging\build
 if errorlevel 1 exit /b 1
 
-"%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" packaging\su1ra.iss
+if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" (
+  "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" packaging\su1ra.iss
+) else (
+  "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" packaging\su1ra.iss
+)
 if errorlevel 1 exit /b 1
 
 echo Installer: packaging\output\Su1ra-setup-x64.exe

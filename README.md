@@ -1,4 +1,4 @@
-# Su1ra (सूत्र)
+# Su1ra (सूत्र) — v0.3.0
 
 THE BEST harness for your LOCAL AI agentic work - simple UI for simple setup and simple work right away.
 A local, cli style app for [Ollama][Backend]( : https://ollama.com) models. Removing the hassle of setting up agentic and tool calls externally for Ollama.
@@ -14,15 +14,20 @@ I'd appreciate feedback on my page : https://vault-pranesh.pages.dev/
 React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
    (dark console UI)        (also serves the UI)        (localhost:11434)
                                     ↓
-                          SQLite at ~/.local/share/su1ra/
+                  SQLite at ~/.local/share/su1ra/ (%APPDATA%\su1ra on Windows)
 ```
 
 ## Features
 
 - **Streaming chat** with markdown, LaTeX math (KaTeX), and collapsible `// thinking` blocks
 - **True tool-calling** — tool-capable models execute Python through a real subprocess and read the output; works proactively (the model decides when to run code)
+- **Agentic file workspace (code mode)** — give the model a project folder and it reads, writes, and edits files in place instead of pasting rewrites into chat. Scoped to one workspace root no matter what (set it in `/settings`, code section); the model can create but never delete. HTML artifacts preview live from disk as it works.
 - **Built-in Python IDE** — real PTY-backed terminal: ANSI colors, progress bars, interactive `input()`, Ctrl-C; auto-opens when the model presents Python code
 - **Chat ↔ IDE bridge** — run code from chat with one click, attach IDE runs back into the conversation
+- **Modes** — pick the right weight for the job:
+  - `casual` (default): quick chat + small throwaway pages (auto-preview + download on the right). No system prompt, no tools, fast.
+  - `/code`: the design system prompt, file + Python tools, workspace projects. For anything you'll revise.
+  - `/code <message>`: one-shot — full code-mode brains for a single message, then back to casual. Use it when a quick page should still look designed.
 - **Command console** — the only navigation surface; tab-complete everything:
 
   | Command | What it does |
@@ -32,12 +37,20 @@ React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
   | `/newchat` | start a new conversation |
   | `/chats` | list chats; `/chats <n|id>` to open |
   | `/delchat` | delete a chat |
+  | `/clear` | clear the current chat (messages only, keeps the chat + settings) |
+  | `/code` | toggle code mode (code loadout model/ctx, tools on); `/code <msg>` arms one message |
+  | `/casual` | switch to casual mode (everyday model, tools off) |
+  | `/modes` | show mode, model, ctx, think, tools, workspace |
+  | `/mkdir` | new project folder in the workspace — `/mkdir <name>` |
+  | `/cd` | switch active project — `/cd <name>`, bare `/cd` shows root + project |
   | `/settings` | open the settings modal |
   | `/stats` | toggle per-reply performance stats |
   | `/think` | thinking — `/think`, `/think on\|off\|auto` (this chat, persisted) |
   | `/eject` | shut down the Ollama server |
   | `/connect` | start / reconnect Ollama |
   | `/ide` | toggle the Python IDE pane |
+
+  Workspace happy path: `/mkdir deck` → `/cd deck` → `/code` → *"build it as index.html in the workspace"* → revise in place, preview reloads, chat stays clean.
 
 - 10 accent themes, persistent history in SQLite, per-chat system prompt / temperature / context length
 
@@ -48,7 +61,8 @@ React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
 
 ## Requirements
 
-- [Ollama](https://ollama.com/download) installed (the app detects or starts it for you)
+- [Ollama](https://ollama.com/download) installed (the app detects or starts it for you — or use the in-app `[ install ollama ]` button, ~1.5 GB download)
+- Your pulled models live in `~/.ollama` and survive reinstalls — if the app can't reach the server, check `/connect` before re-pulling anything
 - At least one tool-capable model, e.g.:
   ```
   #On the bottom of settings section (when typed /settings into the text box) you can easily access models without terminal, but if you still want other models you can use this.

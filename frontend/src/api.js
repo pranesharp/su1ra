@@ -84,6 +84,10 @@ export const ejectServer = () => sendJSON('/api/eject', 'POST')
 
 export const getGpu = () => getJSON('/api/gpu')
 
+export const mkdirWorkspace = (path) => sendJSON('/api/workspace/mkdir', 'POST', { path })
+
+export const readWorkspaceFile = (path) => getJSON(`/api/workspace/read?path=${encodeURIComponent(path)}`)
+
 export const restartServer = () => sendJSON('/api/ollama/restart', 'POST', {})
 
 export const connectServer = () => sendJSON('/api/connect', 'POST', {})

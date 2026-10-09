@@ -19,13 +19,18 @@ def interpreter_root():
     return exe.parent
 
 
-async def run_python(code, sandboxed=True):
+async def run_python(code, sandboxed=True, cwd=None):
     scratch = DATA_DIR / "scratch"
     scratch.mkdir(parents=True, exist_ok=True)
+    workdir = Path(cwd) if cwd else scratch
+    try:
+        workdir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        workdir = scratch
     cmd = [os.path.abspath(sys.executable), "-u", "-c", code]
     mode = "off"
     if sandboxed:
-        wrapped = sandbox.wrap(cmd, scratch, ro_dirs=[interpreter_root()])
+        wrapped = sandbox.wrap(cmd, workdir, ro_dirs=[interpreter_root()])
         if wrapped:
             cmd = wrapped
             mode = "on"
@@ -33,7 +38,7 @@ async def run_python(code, sandboxed=True):
             mode = "unavailable"
     proc = await asyncio.create_subprocess_exec(
         *cmd,
-        cwd=scratch,
+        cwd=str(workdir),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},

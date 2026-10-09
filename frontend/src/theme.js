@@ -1,5 +1,21 @@
 export const DEFAULT_ACCENT = '#bf264a'
 
+// Stamped into index.html by the backend (serve_index) from the DB, so the
+// very first paint already uses the saved theme instead of these defaults.
+export function readInjectedTheme() {
+  try {
+    const t = window?.__SU1RA_THEME__
+    if (!t || typeof t !== 'object') return {}
+    const out = {}
+    if (typeof t.accent === 'string' && /^#[0-9a-fA-F]{6}$/.test(t.accent)) out.accent = t.accent
+    if (Number.isFinite(+t.bg_brightness)) out.bgBrightness = Math.max(0, Math.min(150, +t.bg_brightness))
+    if (Number.isFinite(+t.bg_contrast)) out.bgContrast = Math.max(0, Math.min(150, +t.bg_contrast))
+    return out
+  } catch {
+    return {}
+  }
+}
+
 export const ACCENTS = [
   { name: 'crimson', hex: '#bf264a' },
   { name: 'ember', hex: '#e05a26' },
