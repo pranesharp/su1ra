@@ -17,3 +17,4 @@ report/
 
 # bundled ollama server (installed via in-app setup)
 ollama/
+AGENTS.md
