@@ -171,7 +171,7 @@ export default function OllamaSetup({ onResolved }) {
         <p className="setup-hint">// ollama is ready — next:</p>
         <p>// 1. pull a model in /settings ([ pull models ])</p>
         <p>// 2. pick it in chat with /models &lt;name&gt;</p>
-        <p>// 3. /code for coding, /modes to see where you are</p>
+        <p>// 3. /build for making things — decks, docs, apps; /modes to see where you are</p>
         <button className="btn-accent" onClick={() => setDismissed(true)}>[ start chatting ]</button>
       </div>
     )

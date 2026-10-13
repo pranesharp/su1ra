@@ -402,8 +402,8 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
           </div>
         </label>
         <div className="hub-launch">
-          <div className="hub-title">Loadout — /code switches between these</div>
-          <div className="hub-sub">casual is everyday chat · code is the /code model (ctx bumps to at least 50000)</div>
+          <div className="hub-title">Loadout — /build switches between these</div>
+          <div className="hub-sub">casual is everyday chat · build is the /build model (ctx bumps to at least 50000)</div>
         </div>
         {view === 'split' ? (
           <div className="loadout-grid">
@@ -421,10 +421,10 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
               <p className="prompt-note">// no need for casual — leave off unless reasoning</p>
             </div>
             <div className="loadout-col">
-              <div className="loadout-title"># code</div>
-              <ModelSelect label="Code model" value={codeModel} onChange={(v) => { setCodeModel(v); commitNow({ loadoutCodeModel: v }) }} models={models} />
-              <CtxField label="Code context" ctxText={codeCtxText} setCtxText={setCodeCtxText} model={codeModel} hint="50000" />
-              <p className="prompt-note">// thinking is always on in code mode — coding is better with think · /think off to override</p>
+              <div className="loadout-title"># build</div>
+              <ModelSelect label="Build model" value={codeModel} onChange={(v) => { setCodeModel(v); commitNow({ loadoutCodeModel: v }) }} models={models} />
+              <CtxField label="Build context" ctxText={codeCtxText} setCtxText={setCodeCtxText} model={codeModel} hint="50000" />
+              <p className="prompt-note">// thinking is always on in build mode — coding is better with think · /think off to override</p>
             </div>
           </div>
         ) : (
@@ -439,13 +439,13 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
               </div>
             </label>
             <p className="prompt-note">// no need for casual — leave off unless reasoning</p>
-            <ModelSelect label="Code model" value={codeModel} onChange={(v) => { setCodeModel(v); commitNow({ loadoutCodeModel: v }) }} models={models} />
-            <CtxField label="Code context" ctxText={codeCtxText} setCtxText={setCodeCtxText} model={codeModel} hint="50000" />
-            <p className="prompt-note">// thinking is always on in code mode — coding is better with think · /think off to override</p>
+            <ModelSelect label="Build model" value={codeModel} onChange={(v) => { setCodeModel(v); commitNow({ loadoutCodeModel: v }) }} models={models} />
+            <CtxField label="Build context" ctxText={codeCtxText} setCtxText={setCodeCtxText} model={codeModel} hint="50000" />
+            <p className="prompt-note">// thinking is always on in build mode — coding is better with think · /think off to override</p>
           </>
         )}
         <label>
-          <span>System prompt (code mode only — ignored in casual chat)</span>
+          <span>System prompt (build mode only — ignored in casual chat)</span>
           <textarea
             rows={4}
             value={systemPrompt}
@@ -453,7 +453,7 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
             placeholder="You are a helpful assistant."
           />
           {showingDefault && (
-            <p className="prompt-note">// showing global default ({(defaultSystemPrompt || '').length} chars) — it is sent in code mode; saving writes to this chat + default</p>
+            <p className="prompt-note">// showing global default ({(defaultSystemPrompt || '').length} chars) — it is sent in build mode; saving writes to this chat + default</p>
           )}
           <div className="prompt-actions">
             <button className="btn-ghost" onClick={openExternal}>[ edit in external editor ]</button>
@@ -483,7 +483,7 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
           <span>Sandbox model-run code (no network, isolated filesystem — Linux only)</span>
         </label>
         <label>
-          <span>Workspace root (code mode files live here — model cannot leave it)</span>
+          <span>Workspace root (build mode files live here — model cannot leave it)</span>
           <input
             type="text"
             spellCheck={false}

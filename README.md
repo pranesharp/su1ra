@@ -1,7 +1,7 @@
-# Su1ra (सूत्र) — v0.3.0
+# Su1ra (सूत्र) — v0.3.1
 
 THE BEST harness for your LOCAL AI agentic work - simple UI for simple setup and simple work right away.
-A local, cli style app for [Ollama][Backend]( : https://ollama.com) models. Removing the hassle of setting up agentic and tool calls externally for Ollama.
+A local, cli style app for [Ollama][Backend] (: https://ollama.com) models. Removing the hassle of setting up agentic and tool calls externally for Ollama.
 Everything runs on your machine, your models, your data, no cloud, no accounts.
 
 I'd appreciate feedback on my page : https://vault-pranesh.pages.dev/
@@ -21,13 +21,13 @@ React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
 
 - **Streaming chat** with markdown, LaTeX math (KaTeX), and collapsible `// thinking` blocks
 - **True tool-calling** — tool-capable models execute Python through a real subprocess and read the output; works proactively (the model decides when to run code)
-- **Agentic file workspace (code mode)** — give the model a project folder and it reads, writes, and edits files in place instead of pasting rewrites into chat. Scoped to one workspace root no matter what (set it in `/settings`, code section); the model can create but never delete. HTML artifacts preview live from disk as it works.
+- **Agentic file workspace (build mode)** — give the model a project folder and it reads, writes, and edits files in place instead of pasting rewrites into chat. Scoped to one workspace root no matter what (set it in `/settings`, build section); the model can create but never delete. HTML artifacts preview live from disk as it works.
 - **Built-in Python IDE** — real PTY-backed terminal: ANSI colors, progress bars, interactive `input()`, Ctrl-C; auto-opens when the model presents Python code
 - **Chat ↔ IDE bridge** — run code from chat with one click, attach IDE runs back into the conversation
 - **Modes** — pick the right weight for the job:
   - `casual` (default): quick chat + small throwaway pages (auto-preview + download on the right). No system prompt, no tools, fast.
-  - `/code`: the design system prompt, file + Python tools, workspace projects. For anything you'll revise.
-  - `/code <message>`: one-shot — full code-mode brains for a single message, then back to casual. Use it when a quick page should still look designed.
+  - `/build`: the design system prompt, file + Python tools, workspace projects — decks, docs, sheets, SVGs, apps. For anything you'll revise.
+  - `/build <message>`: one-shot — full build-mode brains for a single message, then back to casual. Use it when a quick page should still look designed.
 - **Command console** — the only navigation surface; tab-complete everything:
 
   | Command | What it does |
@@ -38,7 +38,7 @@ React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
   | `/chats` | list chats; `/chats <n|id>` to open |
   | `/delchat` | delete a chat |
   | `/clear` | clear the current chat (messages only, keeps the chat + settings) |
-  | `/code` | toggle code mode (code loadout model/ctx, tools on); `/code <msg>` arms one message |
+  | `/build` | toggle build mode (build loadout model/ctx, tools on); `/build <msg>` arms one message |
   | `/casual` | switch to casual mode (everyday model, tools off) |
   | `/modes` | show mode, model, ctx, think, tools, workspace |
   | `/mkdir` | new project folder in the workspace — `/mkdir <name>` |
@@ -49,8 +49,10 @@ React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
   | `/eject` | shut down the Ollama server |
   | `/connect` | start / reconnect Ollama |
   | `/ide` | toggle the Python IDE pane |
+  | `/web` | toggle the Browser Pane |
+  
 
-  Workspace happy path: `/mkdir deck` → `/cd deck` → `/code` → *"build it as index.html in the workspace"* → revise in place, preview reloads, chat stays clean.
+  Workspace happy path: `/mkdir deck` → `/cd deck` → `/build` → *"build it as index.html in the workspace"* → revise in place, preview reloads, chat stays clean.
 
 - 10 accent themes, persistent history in SQLite, per-chat system prompt / temperature / context length
 
@@ -65,7 +67,7 @@ React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
 - Your pulled models live in `~/.ollama` and survive reinstalls — if the app can't reach the server, check `/connect` before re-pulling anything
 - At least one tool-capable model, e.g.:
   ```
-  #On the bottom of settings section (when typed /settings into the text box) you can easily access models without terminal, but if you still want other models you can use this.
+  #On the bottom of settings section (when typed /settings into the text box) you can easily access models without terminal, but if you still want other models you can use this format :
   ollama pull deepseek-coder:6.7b
   
   #Later I'll also implement a way to import a custom model from huggingface - maybe you'd want a "uncensored" kinda model. Till then I guess you can follow tutorials, its pretty simple.
@@ -85,7 +87,7 @@ Download `Su1ra-setup-x64.exe` from releases and run it. The installer fetches t
 
 ### Linux (Working well on arch for me)
 
-Just Git clone and the requirements will do :
+Just Git clone and the requirements will do Then run the sh from dir :
 
 ```bash
 git clone https://github.com/pranesharp/su1ra.git && cd su1ra
@@ -108,15 +110,15 @@ cd frontend && yarn && yarn build && cd ..
 
 ## Building the packages
 
-Linux users run from source (above), so the only packaged artifact is the Windows installer.
+Linux users run from source or the sh script(above), so the only packaged installer artifact is the Windows installer.
 
-Windows (run on a Windows machine in the activated venv, with [Inno Setup 6](https://jrsoftware.org/isinfo.php) installed):
+Windows (run on a Windows machine in the activated venv as well as wsl, with [Inno Setup 6](https://jrsoftware.org/isinfo.php) installed) or directly via bat script in dir:
 
 ```bat
 packaging\build-windows.bat
 ```
 ## Acknowledgements
-*This project was developed with the assistance of zai/glm5.3-flash for drafting , testing, and debugging code.*
+*This project was developed with the assistance of agents for drafting , testing, and debugging code.*
 
 
 ## Data

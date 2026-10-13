@@ -8,6 +8,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,8 +17,11 @@ from pydantic import BaseModel
 
 import httpx
 
+import documents
+import doc_builders
 import ollama
 import ollama_setup
+import pptx_builder
 import puller
 import runner
 import store
@@ -135,6 +139,23 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "ws_cd",
+            "description": (
+                "Switch the active project folder. Use RIGHT AFTER ws_mkdir when starting "
+                "a new project (mkdir + cd, then work). Also use to enter an existing "
+                "project the user names. A bare name means a folder directly inside the "
+                "workspace root. The switch persists and is announced in chat."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"project": {"type": "string", "description": "folder name inside the workspace root, e.g. photosynthesis-deck"}},
+                "required": ["project"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "ws_mkdir",
             "description": "Create a folder at the workspace root (e.g. a new project). Cannot create anything outside the root.",
             "parameters": {
@@ -143,6 +164,156 @@ TOOLS = [
                     "path": {"type": "string", "description": "Folder to create, e.g. project_1"}
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_document",
+            "description": (
+                "Read the extracted text of a document the user attached to this chat "
+                "(PDF, Word, PowerPoint, Excel, or a text/code file). Use this when a "
+                "document is too long to have been shown inline. Documents are labelled "
+                "[doc N] in the conversation. Returns a slice of the text; use offset to "
+                "read further if the result says there is more."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doc": {"type": "integer", "description": "The document number N from its [doc N] label"},
+                    "offset": {"type": "integer", "description": "Character offset to start at (default 0)"},
+                    "limit": {"type": "integer", "description": "Max characters to return (default 8000)"},
+                },
+                "required": ["doc"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "build_pptx",
+            "description": (
+                "Build a real .pptx presentation from a structured outline. ALWAYS prefer "
+                "this over writing python-pptx code — it handles layout, fonts and sizing. "
+                "The deck is saved in the project folder next to a <name>.preview.html slide "
+                "player that opens in the preview pane automatically. Layouts: 'title' "
+                "(title+subtitle), 'section' (divider), 'bullets', 'two_col' (left/right "
+                "bullet arrays), 'table' (rows: first row is the header), 'image' (path "
+                "relative to the project folder; png/jpg/gif/bmp; optional caption). Prefix "
+                "a bullet with '> ' to make it an emphasized accent line. Every slide can "
+                "carry speaker 'notes'. Revise by calling again with the same filename — "
+                "it regenerates in place."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "Deck file name, e.g. photosynthesis.pptx"},
+                    "theme": {"type": "string", "description": "terminal-dark (default) or clean-light"},
+                    "slides": {
+                        "type": "array",
+                        "description": "Slide outline, in order (max 60)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "layout": {"type": "string", "description": "title | section | bullets | two_col | table | image"},
+                                "title": {"type": "string"},
+                                "subtitle": {"type": "string", "description": "title layout only"},
+                                "bullets": {"type": "array", "items": {"type": "string"}, "description": "bullets layout"},
+                                "left": {"type": "array", "items": {"type": "string"}, "description": "two_col left column"},
+                                "right": {"type": "array", "items": {"type": "string"}, "description": "two_col right column"},
+                                "left_title": {"type": "string", "description": "two_col optional column heading"},
+                                "right_title": {"type": "string", "description": "two_col optional column heading"},
+                                "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "table: header row first"},
+                                "image": {"type": "string", "description": "image layout: path relative to the project folder"},
+                                "caption": {"type": "string", "description": "image layout: caption under the image"},
+                                "notes": {"type": "string", "description": "speaker notes for this slide"},
+                            },
+                            "required": ["layout"],
+                        },
+                    },
+                },
+                "required": ["filename", "slides"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "build_xlsx",
+            "description": (
+                "Build a real Excel workbook (.xlsx) from structured data. ALWAYS prefer "
+                "this over writing openpyxl code. Each sheet is {name, rows}; rows is an "
+                "array of arrays — the FIRST row becomes the styled, frozen header. "
+                "Numbers stay numeric. Saved in the project folder next to a "
+                "<name>.preview.html grid viewer that opens automatically. Revise by "
+                "calling again with the same filename."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "e.g. grades.xlsx"},
+                    "title": {"type": "string", "description": "optional workbook title (metadata)"},
+                    "sheets": {
+                        "type": "array",
+                        "description": "1-12 sheets, each {name, rows}",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "rows": {"type": "array", "items": {"type": "array"}, "description": "first row = header"},
+                            },
+                            "required": ["rows"],
+                        },
+                    },
+                },
+                "required": ["filename", "sheets"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "build_docx",
+            "description": (
+                "Build a real Word document (.docx) from a flat block list. ALWAYS prefer "
+                "this over writing python-docx code. Blocks: {\"h1\"}, {\"h2\"}, {\"p\"}, "
+                "{\"bullets\": [...]}, {\"numbers\": [...]}, {\"table\": {\"rows\": [[...]]}} "
+                "(first row = header), {\"pagebreak\": true}. Saved in the project folder "
+                "next to a <name>.preview.html page viewer that opens automatically. "
+                "Revise by calling again with the same filename."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "e.g. essay.docx"},
+                    "title": {"type": "string", "description": "document title (centered heading)"},
+                    "blocks": {"type": "array", "description": "ordered content blocks", "items": {"type": "object"}},
+                },
+                "required": ["filename", "blocks"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "build_pdf",
+            "description": (
+                "Build a real PDF (A4) from the same flat block list as build_docx: "
+                "{\"h1\"}, {\"h2\"}, {\"p\"}, {\"bullets\"}, {\"numbers\"}, "
+                "{\"table\": {\"rows\": [[...]]}}, {\"pagebreak\": true}. Use for "
+                "handouts, worksheets and print-ready school documents. Saved in the "
+                "project folder next to a <name>.preview.html viewer that opens "
+                "automatically. Revise by calling again with the same filename."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "e.g. worksheet.pdf"},
+                    "title": {"type": "string", "description": "document title"},
+                    "blocks": {"type": "array", "description": "ordered content blocks", "items": {"type": "object"}},
+                },
+                "required": ["filename", "blocks"],
             },
         },
     },
@@ -166,6 +337,58 @@ def format_ws_result(res):
     if "exists" in res:
         return f"[folder {res['path']}" + (" — already existed]" if res["exists"] else " — created]")
     return f"[{res.get('path', 'ok')}: {res.get('chars', 0)} chars written]"
+
+
+def format_pptx_result(res):
+    """Human text for a build_pptx tool result."""
+    if not res.get("ok"):
+        return f"[pptx error: {res.get('error')}]"
+    lines = [f"[pptx ok] {res['path']} · {res['slides']} slide(s) · theme {res['theme']} · preview: {res['preview']}"]
+    lines += [f"[warn] {w}" for w in res.get("warnings", [])]
+    return "\n".join(lines)
+
+
+def format_doc_result(res, label):
+    """Human text for a build_xlsx/docx/pdf tool result."""
+    if not res.get("ok"):
+        return f"[{label} error: {res.get('error')}]"
+    summary = (
+        f"{res['sheets']} sheet(s)" if "sheets" in res else f"{res['blocks']} block(s)"
+    )
+    lines = [f"[{label} ok] {res['path']} · {summary} · preview: {res['preview']}"]
+    lines += [f"[warn] {w}" for w in res.get("warnings", [])]
+    return "\n".join(lines)
+
+
+def read_document_slice(conversation_id, arguments):
+    """Return a slice of a stored document's text, addressed by its [doc N] label."""
+    try:
+        doc_num = int(arguments.get("doc"))
+    except (TypeError, ValueError):
+        return "[read_document: 'doc' must be the number from the [doc N] label]"
+    offset = arguments.get("offset") or 0
+    limit = arguments.get("limit") or INLINE_DOC_CHARS
+    try:
+        offset = max(0, int(offset))
+        limit = max(1, min(int(limit), 20000))
+    except (TypeError, ValueError):
+        return "[read_document: offset/limit must be integers]"
+    docs = [
+        a for a in store.get_attachments_for_conversation(conversation_id)
+        if a.get("kind") == "document"
+    ]
+    if doc_num < 1 or doc_num > len(docs):
+        return f"[read_document: no document [doc {doc_num}] in this chat — available: 1..{len(docs)}]"
+    ref = store.get_attachment(docs[doc_num - 1]["id"])
+    text = (ref or {}).get("text") or ""
+    if not text:
+        return f"[read_document: [doc {doc_num}] has no extractable text]"
+    chunk = text[offset:offset + limit]
+    end = offset + len(chunk)
+    header = f"[doc {doc_num} · {ref['filename']} · chars {offset}-{end} of {len(text)}]"
+    if end < len(text):
+        header += f"\n(more remains — call read_document again with offset={end})"
+    return f"{header}\n{chunk}"
 
 
 def build_history(rows):
@@ -258,6 +481,24 @@ class ChatRequest(BaseModel):
     tools: bool = False
     think: bool | str | None = None
     code_mode: bool = False
+    attachment_ids: list[int] = []
+
+
+class AttachmentUpload(BaseModel):
+    conversation_id: int
+    filename: str = ""
+    mime: str = ""
+    data: str = ""
+
+
+class AttachmentPathUpload(BaseModel):
+    conversation_id: int
+    path: str = ""
+    filename: str = ""
+
+
+class ClientLog(BaseModel):
+    message: str = ""
 
 
 class ConversationCreate(BaseModel):
@@ -321,6 +562,191 @@ async def status():
 @app.get("/api/models")
 async def models():
     return {"models": await ollama.list_models()}
+
+
+ALLOWED_IMAGE_MIME = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+}
+# Extension -> mime, used when a file arrives by path (Wayland drop) with no
+# browser-supplied content type.
+IMAGE_EXT_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
+}
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
+# Documents whose extracted text is at or below this are inlined into the
+# message; longer ones are stored and fetched on demand via read_document.
+INLINE_DOC_CHARS = 8000
+
+
+@app.get("/api/model/caps")
+async def model_caps(model: str):
+    """Capabilities the UI gates features on (vision -> show the [+] button)."""
+    return {
+        "tools": await ollama.model_supports_tools(model),
+        "vision": await ollama.model_supports_vision(model),
+    }
+
+
+@app.post("/api/client-log")
+async def client_log(body: ClientLog):
+    """Frontend debug lines, printed to the backend terminal (kitty), so DnD
+    diagnostics are visible without opening the webview devtools."""
+    if os.environ.get("SU1RA_DEBUG") == "1":
+        print(f"[su1ra:dnd] {body.message}", flush=True)
+    return {"ok": True}
+
+
+class PageInfoRequest(BaseModel):
+    url: str = ""
+
+
+@app.post("/api/page/info")
+async def page_info(body: PageInfoRequest):
+    """Probe a URL for the browser pane: frameable? fetchable? html or js?"""
+    url = (body.url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "url must start with http:// or https://")
+    return await asyncio.to_thread(documents.page_info, url)
+
+
+class PageSummarizeRequest(BaseModel):
+    conversation_id: int | None = None
+    url: str = ""
+
+
+@app.post("/api/page/summarize")
+async def page_summarize(body: PageSummarizeRequest):
+    """Fetch a page and return its extracted text so the chat can summarize it.
+
+    The frontend injects the returned text as a user message; the model then
+    summarizes it. Kept separate from /api/chat so the pane controls when.
+    """
+    url = (body.url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "url must start with http:// or https://")
+    try:
+        page = await asyncio.to_thread(documents.fetch_page_text, url)
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
+    if page["js_rendered"]:
+        raise HTTPException(
+            502,
+            "this page is JavaScript-rendered — its content isn't in the HTML, "
+            "so it can't be summarized. Try [ open externally ].",
+        )
+    return page
+
+
+def _store_attachment(conversation_id, filename, mime, data):
+    """Validate + persist one uploaded file (image or document). Returns the ref."""
+    mime = (mime or "").lower()
+    filename = filename or ""
+    ext = Path(filename).suffix.lower()
+    # Files arriving by path (Wayland drop) carry no content type — infer it.
+    if not mime and ext in IMAGE_EXT_MIME:
+        mime = IMAGE_EXT_MIME[ext]
+    is_image = mime in ALLOWED_IMAGE_MIME
+    is_doc = documents.is_document_ext(ext) or mime in documents.DOCUMENT_MIMES
+    if not is_image and not is_doc:
+        raise HTTPException(415, f"unsupported file type: {mime or ext or 'unknown'}")
+    if not store.get_conversation(conversation_id):
+        raise HTTPException(404, "Conversation not found")
+    if not data:
+        raise HTTPException(422, "empty file")
+    limit = MAX_IMAGE_BYTES if is_image else MAX_DOCUMENT_BYTES
+    if len(data) > limit:
+        raise HTTPException(413, f"file too large (max {limit // (1024 * 1024)} MB)")
+
+    store.ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+    if is_image:
+        stored = store.ATTACHMENTS_DIR / f"{uuid.uuid4().hex}{ALLOWED_IMAGE_MIME[mime]}"
+        stored.write_bytes(data)
+        return store.add_attachment(
+            conversation_id,
+            filename=filename or stored.name,
+            mime=mime,
+            size=len(data),
+            path=str(stored),
+            kind="image",
+        )
+
+    # Document: keep the original file, extract its text once, store both.
+    stored = store.ATTACHMENTS_DIR / f"{uuid.uuid4().hex}{ext or '.txt'}"
+    stored.write_bytes(data)
+    try:
+        extracted = documents.extract(str(stored), filename or stored.name)
+    except RuntimeError as exc:
+        stored.unlink(missing_ok=True)
+        raise HTTPException(422, str(exc))
+    return store.add_attachment(
+        conversation_id,
+        filename=filename or stored.name,
+        mime=mime or "application/octet-stream",
+        size=len(data),
+        path=str(stored),
+        kind="document",
+        text=extracted["text"],
+        meta={**extracted.get("meta", {}), "doc_kind": extracted["kind"], "truncated": extracted["truncated"]},
+    )
+
+
+@app.post("/api/attachments")
+async def upload_attachment(body: AttachmentUpload):
+    """Accept a base64 image or document (JSON, no multipart dependency)."""
+    try:
+        data = base64.b64decode(body.data, validate=True)
+    except Exception:
+        raise HTTPException(422, "invalid base64 data")
+    ref = _store_attachment(body.conversation_id, body.filename, body.mime, data)
+    return {"attachment": ref}
+
+
+@app.post("/api/attachments/from-path")
+async def upload_attachment_from_path(body: AttachmentPathUpload):
+    """Import a file by absolute path.
+
+    Needed on Wayland/Hyprland, where a drag arrives as `text/uri-list` and the
+    webview cannot read the dropped file itself — so the frontend sends the
+    path and the backend reads it from disk.
+    """
+    raw = (body.path or "").strip()
+    if raw.startswith("file://"):
+        raw = raw[len("file://"):]
+    try:
+        raw = unquote(raw)
+    except Exception:
+        pass
+    path = Path(raw)
+    if not path.is_file():
+        raise HTTPException(404, f"file not found: {path.name or raw}")
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise HTTPException(422, f"could not read file: {exc}")
+    ref = _store_attachment(body.conversation_id, body.filename or path.name, "", data)
+    return {"attachment": ref}
+
+
+@app.get("/api/attachments/{attachment_id}")
+async def get_attachment_file(attachment_id: int):
+    ref = store.get_attachment(attachment_id)
+    if not ref:
+        raise HTTPException(404, "Attachment not found")
+    path = Path(ref["path"])
+    if not path.is_file():
+        raise HTTPException(404, "Attachment file missing")
+    return FileResponse(path, media_type=ref["mime"] or "application/octet-stream")
 
 
 @app.get("/api/model/ctx")
@@ -760,22 +1186,96 @@ async def clear_conversation(conversation_id: int):
     return {"ok": True, "cleared": count}
 
 
+class PreviewBody(BaseModel):
+    path: str
+
+
+@app.post("/api/preview")
+async def preview_file(body: PreviewBody):
+    """Generate <name>.preview.html for an existing pptx/xlsx/docx/pdf/svg in
+    the active project (or workspace root). Read-only for the source file."""
+    if not body.path.strip():
+        raise HTTPException(422, "path required")
+    try:
+        target = workspace.resolve(body.path)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    if not target.is_file():
+        raise HTTPException(404, f"no such file: {body.path}")
+    try:
+        res = doc_builders.preview_existing(target)
+    except doc_builders.OutlineError as exc:
+        raise HTTPException(422, str(exc))
+    except Exception as exc:
+        raise HTTPException(500, f"preview failed: {exc}")
+    return {"ok": True, "path": res["path"], "source": res["source"]}
+
+
 @app.post("/api/chat")
 async def chat(body: ChatRequest):
     conversation = store.get_conversation(body.conversation_id)
     if not conversation:
         raise HTTPException(404, "Conversation not found")
     content = body.content.strip()
-    if not content:
+    if not content and not body.attachment_ids:
         raise HTTPException(422, "Empty message")
     model = body.model or conversation["model"]
     if not model:
         raise HTTPException(422, "No model selected")
 
+    # Resolve picked attachments first. Images are base64'd for Ollama and
+    # labelled [image N]; documents are labelled [doc N] and either inlined
+    # (short) or left for the read_document tool (long). Labels are
+    # per-conversation (1..n per kind), assigned in the order sent, so the
+    # model can map prose references ("this [image 1]", "in [doc 2]") to a
+    # specific attachment.
+    image_b64 = []
+    image_labels = []
+    doc_labels = []
+    inline_docs = []
+    deferred_docs = []
+    for aid in body.attachment_ids:
+        ref = store.get_attachment(aid)
+        # Only label attachments that are actually pending in this conversation
+        # — the same set attach_to_message will link — so labels and stored idx
+        # can never drift apart.
+        if not ref or ref["conversation_id"] != body.conversation_id or ref["message_id"] is not None:
+            continue
+        if ref.get("kind") == "document":
+            n = len(doc_labels) + 1
+            doc_labels.append(f"[doc {n}]")
+            text = ref.get("text") or ""
+            if text and len(text) <= INLINE_DOC_CHARS:
+                inline_docs.append((n, ref["filename"], text))
+            else:
+                deferred_docs.append((n, ref["filename"], len(text)))
+            continue
+        try:
+            raw = Path(ref["path"]).read_bytes()
+        except OSError:
+            continue
+        image_b64.append(base64.b64encode(raw).decode("ascii"))
+        image_labels.append(f"[image {len(image_labels) + 1}]")
+
+    prefix = " ".join(image_labels + doc_labels)
+    if prefix:
+        content = f"{prefix}\n{content}".strip()
+    for n, name, text in inline_docs:
+        content += f"\n\n--- [doc {n}] {name} ---\n{text}"
+    for n, name, length in deferred_docs:
+        content += (
+            f"\n\n--- [doc {n}] {name} ---\n"
+            f"(long document, {length} chars — use the read_document tool with doc={n} to read it)"
+        )
+
     user_row = store.add_message(body.conversation_id, "user", content)
     if not conversation["title"]:
         store.update_conversation(body.conversation_id, title=content[:60])
+    if body.attachment_ids:
+        store.attach_to_message(body.attachment_ids, user_row["id"], body.conversation_id)
     history = build_history(store.get_messages(body.conversation_id))
+    if image_b64 and history:
+        history[-1]["images"] = image_b64
     # Tools are strictly code-mode: casual never offers them, no matter what
     # the client asked for. (The old ```python auto-arm is gone on purpose.)
     tools = TOOLS if body.tools and body.code_mode and await ollama.model_supports_tools(model) else None
@@ -787,7 +1287,14 @@ async def chat(body: ChatRequest):
         ws_rules = (
             f"Workspace: ROOT={workspace.root()} PROJECT={workspace.project_dir()}. "
             "File tools (ws_ls/read/write/edit/mkdir) resolve inside ROOT only — "
-            "paths relative to PROJECT, never absolute. Read a file before editing it; "
+            "paths relative to PROJECT, never absolute. "
+            "NEW PROJECTS: before producing files for a new project, ALWAYS make a fresh "
+            "folder and enter it in one step with ws_cd (it creates the folder if missing) "
+            "— pick a short kebab-case name from the request, e.g. ws_cd photosynthesis-deck. "
+            "NEVER write files straight into the workspace root or reuse the current "
+            "project for a different task; only work in an existing project when the user "
+            "clearly means it (\"fix my deck\", \"continue the essay\"). "
+            "Read a file before editing it; "
             "ws_edit needs an anchor matching exactly once (check the match count). "
             "One edit per call. Never paste file contents into chat — confirm in one line. "
             "If a tool says denied, stop and ask the user in plain words; never retry paths. "
@@ -799,7 +1306,13 @@ async def chat(body: ChatRequest):
         )
         directive = (
             "You have file tools plus run_python. Use them proactively for computation, "
-            "running code, and file work — call them instead of guessing results. " + ws_rules
+            "running code, and file work — call them instead of guessing results. "
+            "For slide decks (.pptx), call the build_pptx tool with a structured outline "
+            "instead of writing python-pptx code — it saves the deck plus an HTML slide "
+            "preview that opens automatically in the preview pane. Same for other school "
+            "formats: build_xlsx (Excel workbooks), build_docx (Word documents) and "
+            "build_pdf (PDF handouts/worksheets) all take a structured outline and save "
+            "the file plus an auto-opening preview. " + ws_rules
         )
         sys_prompt = f"{sys_prompt}\n\n{directive}" if sys_prompt.strip() else directive
         # Auto-context (always): the model sees the live project listing every
@@ -824,8 +1337,9 @@ async def chat(body: ChatRequest):
                     )
             else:
                 sys_prompt += (
-                    "\n\n[no active project — if the user wants file work, tell them "
-                    "to /mkdir a project and /cd into it first]"
+                    "\n\n[no active project — if the user wants file work, do NOT ask them "
+                    "to run commands: pick a short folder name for the project and call "
+                    "ws_cd <name> (it creates the folder and switches to it), then work]"
                 )
         except Exception:
             pass
@@ -914,7 +1428,7 @@ async def chat(body: ChatRequest):
                     except Exception as exc:
                         result = None
                         result_text = f"[execution error: {exc}]"
-                elif name in ("ws_ls", "ws_read", "ws_write", "ws_edit", "ws_mkdir"):
+                elif name in ("ws_ls", "ws_read", "ws_write", "ws_edit", "ws_mkdir", "ws_cd"):
                     try:
                         if name == "ws_ls":
                             ws_res = workspace.ls(ws_path)
@@ -924,16 +1438,95 @@ async def chat(body: ChatRequest):
                             ws_res = workspace.write(ws_path, arguments.get("content") or "")
                         elif name == "ws_edit":
                             ws_res = workspace.edit(ws_path, arguments.get("find") or "", arguments.get("replacement") or "")
+                        elif name == "ws_cd":
+                            # mkdir-if-missing + switch, atomically: starting a
+                            # new project is always "new folder, then enter it".
+                            target = str(arguments.get("project") or arguments.get("path") or "").strip()
+                            if not target:
+                                ws_res = {"ok": False, "error": "name the project folder to cd into"}
+                            else:
+                                made = workspace.mkdir(target)
+                                if not made.get("ok"):
+                                    ws_res = made
+                                else:
+                                    shown = workspace.set_active_project(target)
+                                    ws_res = {"ok": True, "path": shown, "created": not made.get("exists", True)}
+                            result = {"exit": 0 if ws_res.get("ok") else 1, "ws": ws_res}
+                            result_text = (
+                                f"[project: {ws_res['path']}"
+                                + (" — created]" if ws_res.get("created") else "]")
+                                if ws_res.get("ok")
+                                else f"[denied/error: {ws_res.get('error')}]"
+                            )
                         else:
                             ws_res = workspace.mkdir(ws_path)
-                        result = {"exit": 0 if ws_res.get("ok") else 1, "ws": ws_res}
-                        result_text = format_ws_result(ws_res)
+                            result = {"exit": 0 if ws_res.get("ok") else 1, "ws": ws_res}
+                            result_text = format_ws_result(ws_res)
+                        if name in ("ws_cd", "ws_mkdir"):
+                            # refresh the header/auto-context project info
+                            ws_path = ""
                     except Exception as exc:
                         result = None
                         result_text = f"[workspace error: {exc}]"
+                elif name == "build_pptx":
+                    args = dict(arguments)
+                    if "slides" not in args and args.get("code"):
+                        # finalize_tool_call parks unparseable-JSON args under
+                        # "code" (its run_python fallback) — recover the real
+                        # outline from that string before giving up.
+                        try:
+                            recovered = json.loads(str(args["code"]))
+                            if isinstance(recovered, dict):
+                                args = recovered
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    try:
+                        res = pptx_builder.build_deck(args, workspace.project_dir())
+                        result = {"exit": 0, "ws": res}
+                        result_text = format_pptx_result(res)
+                        # The preview player is plain html — reuse the artifact
+                        # pane bridge by reporting it as the event path.
+                        ws_path = res["preview"]
+                    except pptx_builder.OutlineError as exc:
+                        result = {"exit": 1, "ws": {"ok": False, "error": str(exc)}}
+                        result_text = f"[pptx outline rejected: {exc}]"
+                    except Exception as exc:
+                        result = None
+                        result_text = f"[pptx error: {exc}]"
+                elif name in ("build_xlsx", "build_docx", "build_pdf"):
+                    args = dict(arguments)
+                    body_keys = ("sheets", "blocks", "rows") if name == "build_xlsx" else ("blocks",)
+                    if not any(k in args for k in body_keys) and args.get("code"):
+                        # finalize_tool_call parks unparseable-JSON args under
+                        # "code" (its run_python fallback) — recover first.
+                        try:
+                            recovered = json.loads(str(args["code"]))
+                            if isinstance(recovered, dict):
+                                args = recovered
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    try:
+                        if name == "build_xlsx":
+                            res = doc_builders.build_xlsx(args, workspace.project_dir())
+                        elif name == "build_docx":
+                            res = doc_builders.build_docx(args, workspace.project_dir())
+                        else:
+                            res = doc_builders.build_pdf(args, workspace.project_dir())
+                        result = {"exit": 0, "ws": res}
+                        result_text = format_doc_result(res, name.replace("build_", ""))
+                        ws_path = res["preview"]
+                    except doc_builders.OutlineError as exc:
+                        result = {"exit": 1, "ws": {"ok": False, "error": str(exc)}}
+                        result_text = f"[{name} outline rejected: {exc}]"
+                    except Exception as exc:
+                        result = None
+                        result_text = f"[{name} error: {exc}]"
+                elif name == "read_document":
+                    result = None
+                    result_text = read_document_slice(body.conversation_id, arguments)
                 else:
                     result = None
-                    result_text = f"Unknown tool: {name}. Available: run_python, ws_ls, ws_read, ws_write, ws_edit, ws_mkdir."
+                    result_text = f"Unknown tool: {name}. Available: run_python, ws_ls, ws_read, ws_write, ws_edit, ws_mkdir, ws_cd, build_pptx, build_xlsx, build_docx, build_pdf, read_document."
                 row = store.add_message(body.conversation_id, "tool", result_text)
                 working.append({"role": "tool", "content": result_text})
                 yield json.dumps(
@@ -941,7 +1534,7 @@ async def chat(body: ChatRequest):
                         "tool": {
                             "name": name,
                             "code": code,
-                            "path": ws_path if name.startswith("ws_") else "",
+                            "path": ws_path if (name.startswith("ws_") or name.startswith("build_")) else "",
                             "output": result_text,
                             "id": row["id"],
                             "exit": result["exit"] if result else None,
@@ -1153,6 +1746,7 @@ class DownloadBody(BaseModel):
     filename: str | None = None
     css: str | None = None
     js: str | None = None
+    kind: str | None = None  # "html" (default) or "svg"
 
 
 def _inject_tag(html: str, tag: str, anchor: str, skip_pattern: str) -> str:
@@ -1211,6 +1805,23 @@ async def download_artifact(body: DownloadBody):
         target_dir = downloads
     except OSError:
         target_dir = Path.home()
+    # SVG artifact: single .svg file in Downloads (no project folder path).
+    kind = (body.kind or "html").lower()
+    if kind not in ("html", "svg"):
+        raise HTTPException(422, "kind must be 'html' or 'svg'")
+    if kind == "svg":
+        if "<svg" not in body.content[:2000].lower():
+            raise HTTPException(422, "Not an SVG document")
+        final = None
+        for i in range(1, 1000):
+            candidate = target_dir / f"su1ra-{name}{'' if i == 1 else f'-{i}'}.svg"
+            if not candidate.exists():
+                final = candidate
+                break
+        if final is None:
+            raise HTTPException(409, "Could not pick a file name")
+        final.write_text(body.content, encoding="utf-8")
+        return {"ok": True, "path": str(final)}
     if not css and not js:
         final = None
         for i in range(1, 1000):
@@ -1295,6 +1906,8 @@ def serve_index():
             "bg_brightness": _int("bg_brightness", 100, 0, 150),
             "bg_contrast": _int("bg_contrast", 100, 0, 150),
         })
+        + ";window.__SU1RA_DEBUG__="
+        + ("true" if os.environ.get("SU1RA_DEBUG") == "1" else "false")
         + ";</script>"
     )
     if "</head>" in html:

@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import subprocess
 import sys
@@ -41,7 +42,7 @@ LOADING_HTML = """<!doctype html>
   <div class="pywebview-drag-region">
     <div class="logo-row">
       <svg width="34" height="34" viewBox="0 0 128 128"><rect x="3" y="3" width="122" height="122" rx="20" fill="#0b0b0e" stroke="#26262c" stroke-width="5"/><rect x="32" y="32" width="64" height="64" fill="__ACCENT__"/><text x="64" y="67" text-anchor="middle" dominant-baseline="middle" font-family="monospace" font-weight="800" font-size="36" fill="#ffffff">1s</text></svg>
-      <span class="brand">Su1ra</span><span class="ver">v0.3.0</span>
+      <span class="brand">Su1ra</span><span class="ver">v0.3.1</span>
     </div>
     <div id="status">starting api server<span class="cursor"></span></div>
   </div>
@@ -183,6 +184,13 @@ import webview
 
 import store as su1ra_store
 
+# Links inside the in-app browser pane are `target="_blank"` (that's how Bing
+# and most search engines emit results). pywebview's default is to hand those
+# to the SYSTEM browser (webbrowser.open -> Firefox), which yanks the user out
+# of the app. Turning this off makes `_blank` navigations load in-app instead.
+# Honored on GTK, Windows (edgechromium), macOS and Qt.
+webview.settings['OPEN_EXTERNAL_LINKS_IN_BROWSER'] = False
+
 
 # NOTE 2026-10-09: frameless retired after a full bisect (probes v1–v3 in
 # %TEMP%/opencode all render fine, yet the real app hangs intermittently:
@@ -193,6 +201,39 @@ import store as su1ra_store
 su1ra_store.init_db()
 accent = su1ra_store.get_setting("accent") or "#bf264a"
 
+
+# --- Native drag & drop (Linux/Wayland) ------------------------------------
+# On Wayland/Hyprland a drag reaches the DOM as `text/uri-list` but
+# `dataTransfer.getData()` comes back empty, so the webview cannot read the
+# dropped file. pywebview's GTK backend DOES capture the real paths (into
+# `webview.dom._dnd_state['paths']`) — but it only forwards them to JS by
+# attaching `pywebviewFullPath` to entries in `dataTransfer.files`, which is
+# empty on Wayland. So we read the captured paths directly and expose them to
+# the frontend via a JS API.
+#
+# This is a no-op on Windows/macOS (the DOM `Files` path already works there).
+class NativeDrop:
+    """JS bridge: the frontend calls takePaths() on drop to collect any file
+    paths pywebview's GTK backend captured from the native drag."""
+
+    def takePaths(self):
+        try:
+            from webview.dom import _dnd_state
+
+            paths = [p[1] for p in _dnd_state["paths"]]
+            _dnd_state["paths"] = []
+            return paths
+        except Exception:
+            return []
+
+
+class Su1raBridge(NativeDrop):
+    """Single js_api object exposed to the frontend (pywebview takes one).
+
+    Currently just the Wayland drag & drop bridge (see NativeDrop).
+    """
+
+
 window = webview.create_window(
     "Su1ra",
     html=LOADING_HTML.replace("__ACCENT__", accent).replace("__APP_URL__", APP_URL),
@@ -202,7 +243,101 @@ window = webview.create_window(
     background_color="#0b0b0e",
     frameless=False,
     resizable=True,
+    js_api=Su1raBridge(),
 )
+
+
+def _register_native_drop():
+    try:
+        window.dom.document.events.drop += lambda e: None
+        print("[su1ra] native drop hook registered", flush=True)
+    except Exception as exc:  # pragma: no cover - platform dependent
+        print(f"[su1ra] native drop hook unavailable: {exc}", flush=True)
+
+
+window.events.loaded += _register_native_drop
+
+
+def _js_str(s):
+    """Safely embed a Python string as a JS string literal."""
+    return json.dumps(str(s))
+
+
+def _install_new_window_handler():
+    """Route `target="_blank"` navigations into the browser pane.
+
+    Every Bing/Google result link is `target="_blank"`. pywebview's GTK backend
+    handles those in `on_navigation` (decide-policy) by calling
+    `webbrowser.open()` — which yanks the user into Firefox. We hook
+    `decide-policy` ourselves, hand the URL to the frontend (which points the
+    pane's iframe at it) and call `decision.ignore()` to cancel the top-level
+    navigation so the app is not replaced.
+
+    Note: hooking `create` instead does NOT work — returning a widget from that
+    signal crashes WebKit (`std::optional<WindowFeatures>` assertion), and
+    returning None lets the default navigation replace the app.
+    """
+    try:
+        import gi
+
+        gi.require_version("WebKit2", "4.1")
+        from gi.repository import WebKit2
+
+        def on_decide_policy(view, decision, _dtype):
+            try:
+                if isinstance(decision, WebKit2.NavigationPolicyDecision):
+                    action = decision.get_navigation_action()
+                    if action.get_frame_name() == "_blank":
+                        uri = action.get_request().get_uri()
+                        if uri:
+                            view.run_javascript(
+                                "window.__su1raOpenInPane && window.__su1raOpenInPane(%s)"
+                                % _js_str(uri)
+                            )
+                        # Cancel the navigation so the main webview stays put.
+                        decision.ignore()
+                        return True
+            except Exception as exc:
+                print(f"[su1ra] pane nav failed: {exc}", flush=True)
+            return False
+
+        # pywebview keeps its GTK BrowserView objects in a class-level registry
+        # keyed by window uid (gtk.py: `BrowserView.instances[window.uid] = self`).
+        # window.gui is NOT set on the GTK backend, so that path finds nothing.
+        from webview.platforms.gtk import BrowserView
+
+        browser = BrowserView.instances.get(window.uid)
+        if browser is None and BrowserView.instances:
+            # Fall back to any registered view (first window is 'master').
+            browser = next(iter(BrowserView.instances.values()))
+        wv = getattr(browser, "webview", None)
+        if wv is not None:
+            if getattr(wv, "_su1ra_pane_nav", False):
+                return
+            pywebview_nav = getattr(browser, "on_navigation", None)
+            try:
+                wv.disconnect_by_func(pywebview_nav)
+            except Exception as exc:
+                print(f"[su1ra] could not detach pywebview nav handler: {exc}", flush=True)
+                pywebview_nav = None
+
+            def handler(view, decision, dtype):
+                if on_decide_policy(view, decision, dtype):
+                    return True
+                if pywebview_nav is not None:
+                    pywebview_nav(view, decision, dtype)
+                return False
+
+            wv.connect("decide-policy", handler)
+            wv._su1ra_pane_nav = True
+            print("[su1ra] new-window handler installed", flush=True)
+            return
+        print("[su1ra] new-window handler: no native webview found", flush=True)
+    except Exception as exc:  # pragma: no cover - platform dependent
+        print(f"[su1ra] new-window handler unavailable: {exc}", flush=True)
+
+
+window.events.loaded += _install_new_window_handler
 
 
 

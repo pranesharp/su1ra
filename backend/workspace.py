@@ -1,6 +1,6 @@
 """Workspace: the one folder-tree the model may touch (code mode only).
 
-Boundary = workspace root (a /code-loadout setting, default
+Boundary = workspace root (a /build-loadout setting, default
 ~/Documents/su1ra_projects). Every file tool resolves through safe_join:
 absolute resolution + symlink resolution must stay inside the root, or the
 call is denied. There is deliberately no delete/rename tool — the model

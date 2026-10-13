@@ -23,12 +23,14 @@ const COMMANDS = [
   { cmd: '/connect', desc: 'start / reconnect the ollama server' },
   { cmd: '/stats', desc: 'toggle per-reply performance stats' },
   { cmd: '/think', desc: 'thinking — /think, /think on|off|auto (this chat, persisted)' },
-  { cmd: '/code', desc: 'toggle code mode — switches to the code loadout model/ctx, unloads the casual model; /code <msg> arms one message' },
-  { cmd: '/casual', desc: 'switch to casual mode — everyday chat model, unloads the code model, tools off' },
-  { cmd: '/modes', desc: 'show current mode — casual/code plus model, ctx, think, tools' },
+  { cmd: '/build', desc: 'toggle build mode — switches to the build loadout model/ctx, unloads the casual model; /build <msg> arms one message' },
+  { cmd: '/casual', desc: 'switch to casual mode — everyday chat model, unloads the build model, tools off' },
+  { cmd: '/modes', desc: 'show current mode — casual/build plus model, ctx, think, tools' },
   { cmd: '/ide', desc: 'toggle the python ide pane' },
   { cmd: '/mkdir', desc: 'new project folder in the workspace — /mkdir <name>' },
   { cmd: '/cd', desc: 'switch active project — /cd <name>, or bare /cd to show root + project' },
+  { cmd: '/preview', desc: 'generate + open a preview for a project file — /preview <name.pptx|xlsx|docx|pdf|svg>' },
+  { cmd: '/web', desc: 'open the browser pane — /web <url or search query> (search uses the selected engine)' },
 ]
 
 const STARTER_CODE = `# scratch — runs in ~/.local/share/su1ra/scratch
@@ -36,6 +38,36 @@ print("hello from su1ra")
 
 for i in range(3):
     print(f"tick {i}")`
+
+const ENGINES = {
+  google: { name: 'Google', home: 'https://www.google.com/', search: 'https://www.google.com/search?q=' },
+  brave: { name: 'Brave', home: 'https://search.brave.com/', search: 'https://search.brave.com/search?q=' },
+  ddg: { name: 'DuckDuckGo', home: 'https://duckduckgo.com/', search: 'https://duckduckgo.com/?q=' },
+  yandex: { name: 'Yandex', home: 'https://yandex.com/', search: 'https://yandex.com/search/?text=' },
+  bing: { name: 'Bing', home: 'https://www.bing.com/', search: 'https://www.bing.com/search?q=' },
+}
+
+function toUrl(input, engine) {
+  const s = String(input || '').trim()
+  if (s.startsWith('http://') || s.startsWith('https://')) return s
+  if (!/\s/.test(s) && s.includes('.')) return 'https://' + s
+  return ENGINES[engine].search + encodeURIComponent(s)
+}
+
+function unwrapRedirect(url) {
+  try {
+    const u = new URL(url)
+    if (/(^|\.)bing\.com$/.test(u.hostname) && u.pathname === '/ck/a') {
+      const enc = u.searchParams.get('u') || ''
+      if (enc.startsWith('a1')) {
+        const b64 = enc.slice(2).replace(/-/g, '+').replace(/_/g, '/')
+        const target = atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4))
+        return new URL(target, 'https://www.bing.com/').href
+      }
+    }
+  } catch { /* not a decodable redirect: keep as-is */ }
+  return url
+}
 
 export default function App() {
   const [conversations, setConversations] = useState([])
@@ -73,6 +105,10 @@ export default function App() {
   const [artifact, setArtifact] = useState(null)
   const [artifactTab, setArtifactTab] = useState('preview')
   const [artifactPath, setArtifactPath] = useState(null)
+  const [browserUrl, setBrowserUrl] = useState(null)
+  const [browserHistory, setBrowserHistory] = useState([])
+  const [browserIndex, setBrowserIndex] = useState(-1)
+  const [browserEngine, setBrowserEngine] = useState('bing')
   const [workspace, setWorkspace] = useState({ root: '', project: '' })
   const [codeArmed, setCodeArmed] = useState(false)
   const [sandboxTools, setSandboxTools] = useState(true)
@@ -80,6 +116,10 @@ export default function App() {
   const [engine, setEngine] = useState('auto')
   const [engineVulkan, setEngineVulkan] = useState(false)
   const [settingsView, setSettingsView] = useState('split')
+  const [pendingAttachments, setPendingAttachments] = useState([])
+  const [visionModel, setVisionModel] = useState(false)
+  const [dragActive, setDragActive] = useState(false)
+  const addFilesRef = useRef(() => {})
   const abortRef = useRef(null)
   const modelPullRef = useRef(null)
   const pendingToolRef = useRef(null)
@@ -106,6 +146,151 @@ export default function App() {
   useEffect(() => {
     applyBackground(bgBrightness, bgContrast)
   }, [bgBrightness, bgContrast])
+
+  // Vision capability gates the composer's [+] button. Best-effort: a failed
+  // probe just hides the button rather than breaking the composer.
+  useEffect(() => {
+    let alive = true
+    if (!selectedModel) {
+      setVisionModel(false)
+      return
+    }
+    api
+      .getModelCaps(selectedModel)
+      .then((caps) => {
+        if (alive) setVisionModel(!!caps.vision)
+      })
+      .catch(() => {
+        if (alive) setVisionModel(false)
+      })
+    return () => {
+      alive = false
+    }
+  }, [selectedModel])
+
+  // App-wide drag & drop. Two jobs:
+  //  1. Guard: always preventDefault on dragover/drop so the webview never
+  //     navigates to a dropped file:// (which would replace the whole UI).
+  //  2. Accept: dropping files anywhere in the window adds them, and a
+  //     full-window overlay shows while a drag is in progress.
+  //
+  // Listeners are attached in the CAPTURE phase on `document`: that runs
+  // top-down before any target (e.g. the textarea, which would otherwise
+  // insert the file path) can act on the event, so preventDefault reliably
+  // cancels the native default.
+  useEffect(() => {
+    let depth = 0
+    const dbg = (...a) => {
+      if (!window.__SU1RA_DEBUG__) return
+      const msg = a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')
+      console.log('[su1ra:dnd]', ...a)
+      try {
+        fetch('/api/client-log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: msg }),
+        })
+      } catch {}
+    }
+    // Wayland/Hyprland delivers drags as `text/uri-list` (+ `text/html`), not
+    // the browser-standard `Files`. So accept either, and always preventDefault
+    // on anything that looks like a drag so the webview never navigates.
+    function dragTypes(e) {
+      return Array.from(e.dataTransfer?.types || [])
+    }
+    function isFileDrag(e) {
+      const types = dragTypes(e)
+      return types.includes('Files') || types.includes('text/uri-list')
+    }
+    function urisToFiles(e) {
+      const raw = e.dataTransfer?.getData('text/uri-list') || ''
+      const uris = raw
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter((s) => s && !s.startsWith('#'))
+      const names = uris.map((u) => {
+        try {
+          return decodeURIComponent(u.replace(/^file:\/\//, '').split('/').pop() || '')
+        } catch {
+          return ''
+        }
+      })
+      return { uris, names }
+    }
+    function onDragEnter(e) {
+      dbg('dragenter', dragTypes(e), 'target=', e.target?.tagName)
+      if (!isFileDrag(e)) return
+      e.preventDefault()
+      depth += 1
+      setDragActive(true)
+    }
+    function onDragOver(e) {
+      if (!isFileDrag(e)) return
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'copy'
+    }
+    function onDragLeave(e) {
+      if (!isFileDrag(e)) return
+      depth = Math.max(0, depth - 1)
+      if (depth === 0) setDragActive(false)
+    }
+    async function onDrop(e) {
+      const types = dragTypes(e)
+      const files = Array.from(e.dataTransfer?.files || [])
+      const { uris, names } = urisToFiles(e)
+      dbg('drop', 'types=', types, 'files=', files.length, 'names=', files.map((f) => f.name), 'uris=', uris)
+      if (!isFileDrag(e)) {
+        dbg('drop ignored: not a file drag')
+        return
+      }
+      e.preventDefault()
+      e.stopPropagation()
+      depth = 0
+      setDragActive(false)
+      // pywebview (Linux/GTK) attaches the real absolute path to each dropped
+      // file as `pywebviewFullPath` — the only reliable source on Wayland.
+      const withPaths = files.filter((f) => f.pywebviewFullPath)
+      if (withPaths.length) {
+        dbg('using pywebviewFullPath', withPaths.map((f) => f.pywebviewFullPath))
+        addFilesRef.current(withPaths.map((f) => ({ __path: f.pywebviewFullPath, name: f.name })))
+        return
+      }
+      if (files.length) {
+        addFilesRef.current(files)
+        return
+      }
+      // Wayland: dataTransfer is empty. Ask pywebview's native bridge for the
+      // paths its GTK backend captured from the drag.
+      try {
+        const native = await window.pywebview?.api?.takePaths?.()
+        if (native && native.length) {
+          dbg('using native takePaths', native)
+          addFilesRef.current(native.map((p) => ({ __path: p, name: p.split('/').pop() })))
+          return
+        }
+      } catch (err) {
+        dbg('takePaths failed', String(err))
+      }
+      if (uris.length) {
+        // URI-only drop: the webview cannot read these paths itself, so ask
+        // the backend to load them from disk by path.
+        addFilesRef.current(names.map((name, i) => ({ __path: uris[i], name })))
+      } else {
+        dbg('drop had no usable file source')
+      }
+    }
+    const opts = { capture: true }
+    document.addEventListener('dragenter', onDragEnter, opts)
+    document.addEventListener('dragover', onDragOver, opts)
+    document.addEventListener('dragleave', onDragLeave, opts)
+    document.addEventListener('drop', onDrop, opts)
+    return () => {
+      document.removeEventListener('dragenter', onDragEnter, opts)
+      document.removeEventListener('dragover', onDragOver, opts)
+      document.removeEventListener('dragleave', onDragLeave, opts)
+      document.removeEventListener('drop', onDrop, opts)
+    }
+  }, [])
 
   // Right-button text selection + right-click copy menu. Chromium does not
   // start selections with the right button, and the desktop shell may not
@@ -420,6 +605,17 @@ export default function App() {
       return
     }
 
+    if (cmd === '/web') {
+      if (!arg) {
+        openBrowser(ENGINES[browserEngine].home)
+        pushSystem(`${echo}\n\n// opened the browser pane`)
+      } else {
+        openBrowser(toUrl(arg, browserEngine))
+        pushSystem(`${echo}\n\n// opened in the browser pane`)
+      }
+      return
+    }
+
     if (cmd === '/models') {
       if (arg === 'get' || arg.startsWith('get ')) {
         const query = arg.slice(3).trim()
@@ -678,6 +874,22 @@ export default function App() {
       return
     }
 
+    if (cmd === '/preview') {
+      const file = arg.trim()
+      if (!file) {
+        pushSystem(`${echo}\n\n// usage: /preview <file> — pptx/xlsx/docx/pdf/svg in the current project`)
+        return
+      }
+      try {
+        const res = await api.previewFile(file)
+        pushSystem(`${echo}\n\n// preview: ${res.path} (from ${res.source})`)
+        await refreshFilePreview(res.path)
+      } catch (err) {
+        pushSystem(`${echo}\n\n// preview failed: ${err.message}`)
+      }
+      return
+    }
+
     if (cmd === '/cd') {
       const name = arg.trim()
       if (!name) {
@@ -697,7 +909,7 @@ export default function App() {
       return
     }
 
-    if (cmd === '/code') {
+    if (cmd === '/build' || cmd === '/code') { // /code kept as a hidden alias
       const rest = arg
       if (rest) {
         pushSystem(`${echo}\n\n// one-shot: tools armed for this message (model unchanged)`)
@@ -714,7 +926,7 @@ export default function App() {
           const newCtx = Math.max(currentCtx, loadout.codeCtx || 50000)
           setCodeArmed(true)
           pushSystem(
-            `${echo}\n\n// code mode: on — model ${codeModel || '(none selected)'} · ctx ${newCtx} · think on · ide open (persists until /code or /casual, off on restart)`,
+            `${echo}\n\n// build mode: on — model ${codeModel || '(none selected)'} · ctx ${newCtx} · think on · ide open (persists until /build or /casual, off on restart)`,
           )
           unloadInBackground(oldModel, codeModel)
           await applyModelCtx(codeModel, newCtx)
@@ -741,13 +953,13 @@ export default function App() {
     }
 
     if (cmd === '/modes') {
-      const mode = codeArmed ? 'code' : 'casual'
+      const mode = codeArmed ? 'build' : 'casual'
       const effModel = activeConversation?.model || selectedModel || '(none)'
       const effCtx = activeConversation?.context_length ?? chatDefaultsRef.current.context_length ?? 0
       const effThink =
         activeConversation?.think ?? (codeArmed ? 'on' : loadout.casualThink === 'on' ? 'on' : 'off')
       pushSystem(
-        `${echo}\n\n// mode: ${mode}\n// model: ${effModel} (casual loadout: ${loadout.casualModel || '—'} · code loadout: ${loadout.codeModel || '—'})\n// ctx: ${effCtx} · think: ${effThink || 'auto'} · tools: ${codeArmed ? 'armed' : 'off'} · sysprompt: ${codeArmed ? 'on (code mode)' : 'off (casual)'} · engine: ${engine}${engine === 'gpu' && engineVulkan ? '+vulkan' : ''}\n// workspace: ${workspace.root || '(unset)'}${workspace.project ? ` · project: ${workspace.project}` : ''}`,
+        `${echo}\n\n// mode: ${mode}\n// model: ${effModel} (casual loadout: ${loadout.casualModel || '—'} · build loadout: ${loadout.codeModel || '—'})\n// ctx: ${effCtx} · think: ${effThink || 'auto'} · tools: ${codeArmed ? 'armed' : 'off'} · sysprompt: ${codeArmed ? 'on (build mode)' : 'off (casual)'} · engine: ${engine}${engine === 'gpu' && engineVulkan ? '+vulkan' : ''}\n// workspace: ${workspace.root || '(unset)'}${workspace.project ? ` · project: ${workspace.project}` : ''}`,
       )
       return
     }
@@ -767,9 +979,61 @@ export default function App() {
     return parts.join('\n')
   }
 
+  async function addFiles(files) {
+    if (!files || files.length === 0) return
+    if (window.__SU1RA_DEBUG__) {
+      const msg = `addFiles ${files.map((f) => (f.__path ? `${f.name} (path: ${f.__path})` : `${f.name} (${f.type || 'no type'}, ${f.size}b)`)).join(', ')}`
+      console.log('[su1ra:dnd]', msg)
+      try {
+        fetch('/api/client-log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: msg }),
+        })
+      } catch {}
+    }
+    // Attachments need a conversation to belong to. If none is active yet,
+    // create one lazily (same defaults the send path uses).
+    let convId = activeId
+    if (!activeConversation) {
+      const conversation = await api.createConversation({ model: selectedModel, ...chatDefaultsRef.current })
+      convId = conversation.id
+      setConversations((prev) => [conversation, ...prev])
+      setActiveId(convId)
+    }
+    for (const file of files) {
+      try {
+        const ref = file.__path
+          ? await api.uploadAttachmentFromPath(convId, file.__path, file.name)
+          : await api.uploadAttachment(convId, file)
+        setPendingAttachments((prev) => {
+          const kind = ref.kind === 'document' ? 'document' : 'image'
+          const sameKind = prev.filter((a) => (a.kind === 'document' ? 'document' : 'image') === kind)
+          const next = {
+            ...ref,
+            kind,
+            url: kind === 'image' ? api.attachmentUrl(ref.id) : null,
+            localId: ref.id,
+          }
+          if (kind === 'document') next.docIndex = sameKind.length + 1
+          else next.imgIndex = sameKind.length + 1
+          return [...prev, next]
+        })
+      } catch (err) {
+        pushSystem(`// file rejected: ${err.message}`)
+      }
+    }
+  }
+  addFilesRef.current = addFiles
+
+  function removeAttachment(att) {
+    setPendingAttachments((prev) => prev.filter((a) => a.localId !== att.localId))
+  }
+
   async function send(content, opts = {}) {
     const trimmed = content.trim()
-    if (!trimmed || streaming) return
+    const atts = opts.forceArmed ? [] : pendingAttachments
+    if ((!trimmed && atts.length === 0) || streaming) return
     if (trimmed.startsWith('/') && !opts.forceArmed) {
       await handleCommand(trimmed)
       return
@@ -790,9 +1054,11 @@ export default function App() {
       setConversations((prev) => [conversation, ...prev])
       setActiveId(convId)
     }
-    const userMsg = { id: -++idRef.current, role: 'user', content: outgoing }
+    const attachmentIds = atts.map((a) => a.id)
+    const userMsg = { id: -++idRef.current, role: 'user', content: outgoing, attachments: atts }
     const assistantMsg = { id: -++idRef.current, role: 'assistant', content: '' }
     setMessages((prev) => [...prev, userMsg, assistantMsg])
+    setPendingAttachments([])
     streamTargetRef.current = assistantMsg.id
     setStreaming(true)
     const controller = new AbortController()
@@ -801,7 +1067,15 @@ export default function App() {
     let replyStats = null
     try {
       await api.streamChat(
-        { conversation_id: convId, content: outgoing, model: selectedModel, tools: arm, think, code_mode: codeMode },
+        {
+          conversation_id: convId,
+          content: outgoing,
+          model: selectedModel,
+          tools: arm,
+          think,
+          code_mode: codeMode,
+          attachment_ids: attachmentIds,
+        },
         {
           onUserId: (dbId) =>
             setMessages((prev) => prev.map((m) => (m.id === userMsg.id ? { ...m, id: dbId } : m))),
@@ -859,9 +1133,14 @@ export default function App() {
               return next
             })
             streamTargetRef.current = nextAssistantId
+            // The model switched projects (ws_cd) — sync the header live.
+            if (t.name === 'ws_cd' && (t.exit === 0 || t.exit === null)) {
+              api.getSettings().then((s) => setWorkspace({ root: s.workspace_root || '', project: s.active_project || '' })).catch(() => {})
+            }
             // Artifact bridge: an .html file the model wrote/edited opens
             // (or refreshes) in the preview pane instead of flooding chat.
-            if ((t.name === 'ws_write' || t.name === 'ws_edit') && (t.exit === 0 || t.exit === null)) {
+            // build_pptx reports its generated slide player as the path.
+            if ((t.name === 'ws_write' || t.name === 'ws_edit' || t.name === 'build_pptx') && (t.exit === 0 || t.exit === null)) {
               const p = t.path || ''
               if (/\.html?$/i.test(p)) refreshFilePreview(p)
             }
@@ -925,6 +1204,68 @@ export default function App() {
     await api.saveSettings({ ide_open: false })
   }
 
+  function openBrowser(url) {
+    if (!ideOpen) {
+      setIdeOpen(true)
+      api.saveSettings({ ide_open: true })
+    }
+    setBrowserUrl(url)
+    setBrowserHistory([url])
+    setBrowserIndex(0)
+  }
+
+  function browserNavigate(url) {
+    url = unwrapRedirect(url)
+    setBrowserHistory((prev) => [...prev.slice(0, browserIndex + 1), url])
+    setBrowserIndex(browserIndex + 1)
+    setBrowserUrl(url)
+  }
+
+  // Links inside the pane's iframe are `target="_blank"`. pywebview's GTK
+  // backend catches those in its `create` handler and calls this hook so the
+  // page loads in the PANE instead of replacing the whole app.
+  useEffect(() => {
+    window.__su1raOpenInPane = (url) => {
+      if (!url) return
+      url = unwrapRedirect(url)
+      setIdeOpen(true)
+      setBrowserHistory((prev) => [...prev.slice(0, browserIndex + 1), url])
+      setBrowserIndex(browserIndex + 1)
+      setBrowserUrl(url)
+    }
+    return () => { delete window.__su1raOpenInPane }
+  }, [browserIndex])
+
+  function browserBack() {
+    const ni = browserIndex - 1
+    if (ni < 0) return
+    setBrowserIndex(ni)
+    setBrowserUrl(browserHistory[ni])
+  }
+
+  function browserForward() {
+    const ni = browserIndex + 1
+    if (ni >= browserHistory.length) return
+    setBrowserIndex(ni)
+    setBrowserUrl(browserHistory[ni])
+  }
+
+  function browserClose() {
+    setBrowserUrl(null)
+    if (artifact === null) setIdeOpen(false)
+  }
+
+  // Browser pane -> chat: inject the fetched page text as a user message so
+  // the model summarizes it. Errors surface as a system note, not a crash.
+  function summarizePage(page) {
+    if (page.error) {
+      pushSystem(`// could not summarize ${page.url}\n// ${page.error}`)
+      return
+    }
+    const header = `Summarize this web page in under ~300 words. Focus on the main points; do not reproduce it verbatim.\n\n--- ${page.title || page.url} ---\n${page.url}\n\n`
+    send(header + page.text, { forceArmed: false })
+  }
+
   function extractLastPythonBlock(text) {
     const blocks = [...text.matchAll(/```python\n([\s\S]*?)```/g)]
     const last = blocks.length ? blocks[blocks.length - 1][1].replace(/\n$/, '') : null
@@ -964,9 +1305,9 @@ export default function App() {
     }
   }
 
-  async function downloadArtifact(code, css, js) {
+  async function downloadArtifact(code, css, js, kind) {
     try {
-      const res = await api.downloadArtifact(code, undefined, { css: css || undefined, js: js || undefined })
+      const res = await api.downloadArtifact(code, undefined, { css: css || undefined, js: js || undefined, kind: kind || undefined })
       pushSystem(`// artifact saved to ${res.path}`)
     } catch (err) {
       pushSystem(`// download failed: ${err.message}`)
@@ -1025,6 +1366,7 @@ export default function App() {
     try {
       handle.setPointerCapture(e.pointerId)
     } catch { /* older engines: fall back to window listeners */ }
+    document.body.classList.add('pane-resizing')
     let ended = false
     const onMove = (ev) => {
       if (ended) return
@@ -1034,13 +1376,15 @@ export default function App() {
         onUp()
         return
       }
-      const next = Math.min(1200, Math.max(280, window.innerWidth - ev.clientX))
+      const maxW = Math.max(280, Math.min(1200, window.innerWidth - 360))
+      const next = Math.min(maxW, Math.max(280, window.innerWidth - ev.clientX))
       widthRef.current = next
       setIdeWidth(next)
     }
     const onUp = () => {
       if (ended) return
       ended = true
+      document.body.classList.remove('pane-resizing')
       handle.removeEventListener('pointermove', onMove)
       handle.removeEventListener('pointerup', onUp)
       handle.removeEventListener('pointercancel', onUp)
@@ -1140,13 +1484,21 @@ export default function App() {
 
   return (
     <div className="window">
+      {dragActive && (
+        <div className="drop-overlay">
+          <div className="drop-overlay-inner">
+            <span className="drop-overlay-title">[ drop files to attach ]</span>
+            <span className="drop-overlay-sub">images · pdf · word · powerpoint · excel · text &amp; code</span>
+          </div>
+        </div>
+      )}
       <div className="app">
       <main className="main">
         <header className="app-header pywebview-drag-region" onDoubleClick={onHeaderDouble}>
           <div className="brand-line">
             <Logo size={20} />
             <span className="brand">Su1ra</span>
-            <span className="brand-ver">v0.3.0</span>
+            <span className="brand-ver">v0.3.1</span>
             <span className={`status-tag${status?.ok ? ' ok' : ''}`}>
               [{status?.ok ? 'ok' : 'offline'}]
             </span>
@@ -1156,16 +1508,16 @@ export default function App() {
           <div className="chat-meta">
             <span className="hash">#</span>
             {activeConversation?.title || 'no chat'}
-            <span className="meta-model"> · {codeArmed ? 'code' : 'casual'} · model: {currentModel || 'none'} · think: {currentThink || 'auto'}</span>
+            <span className="meta-model"> · {codeArmed ? 'build' : 'casual'} · model: {currentModel || 'none'} · think: {currentThink || 'auto'}</span>
           </div>
         </header>
         <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} onLoadToIde={loadToIde} onRunCode={runInIde} onDownloadArtifact={downloadArtifact} onOpenArtifact={openArtifact} onOllamaReady={refreshStatus} onResendFrom={resendFrom} />
-        <Composer commands={COMMANDS} disabled={!currentModel} streaming={streaming} onSend={send} onStop={stop} codeArmed={codeArmed} />
+        <Composer commands={COMMANDS} disabled={!currentModel} streaming={streaming} onSend={send} onStop={stop} codeArmed={codeArmed} vision={visionModel} attachments={pendingAttachments} onAddFiles={addFiles} onRemoveAttachment={removeAttachment} />
       </main>
       {ideOpen && (
         <>
-          <div className="ide-resize" onMouseDown={startResize} />
-          {artifact !== null ? (
+          <div className="ide-resize" onPointerDown={startResize} />
+          {artifact !== null || browserUrl !== null ? (
             <ArtifactPane
               width={ideWidth}
               code={artifact}
@@ -1174,6 +1526,17 @@ export default function App() {
               onTab={setArtifactTab}
               onClose={closeIde}
               onDownload={() => downloadArtifact(artifact)}
+              browserUrl={browserUrl}
+              browserHistory={browserHistory}
+              browserIndex={browserIndex}
+              browserEngine={browserEngine}
+              onBrowserNavigate={browserNavigate}
+              onBrowserBack={browserBack}
+              onBrowserForward={browserForward}
+              onBrowserClose={browserClose}
+              onBrowserEngineChange={setBrowserEngine}
+              conversationId={activeId}
+              onSummarize={summarizePage}
             />
           ) : (
             <IdePane

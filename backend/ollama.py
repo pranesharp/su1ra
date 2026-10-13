@@ -230,6 +230,25 @@ async def model_supports_tools(model):
     return supported
 
 
+_vision_cache = {}
+
+
+async def model_supports_vision(model):
+    if model in _vision_cache:
+        return _vision_cache[model]
+    base = base_url()
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(f"{base}/api/show", json={"model": model})
+            resp.raise_for_status()
+            caps = resp.json().get("capabilities") or []
+    except Exception:
+        return False
+    supported = "vision" in caps
+    _vision_cache[model] = supported
+    return supported
+
+
 def models_dir():
     candidates = []
     if os.environ.get("OLLAMA_MODELS"):

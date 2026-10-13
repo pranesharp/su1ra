@@ -19,6 +19,13 @@ Ollama project.
 - Uvicorn — BSD-3-Clause — https://github.com/klaviyo/uvicorn (upstream: https://github.com/encode/uvicorn)
 - httpx — BSD-3-Clause — https://github.com/encode/httpx
 - pywebview — BSD-3-Clause — https://github.com/r0x0r/pywebview
+- pypdf — BSD-3-Clause — https://github.com/py-pdf/pypdf
+- python-docx — MIT — https://github.com/python-openxml/python-docx
+- python-pptx — MIT — https://github.com/scanny/python-pptx
+- openpyxl — MIT — https://foss.heptapod.net/openpyxl/openpyxl
+- beautifulsoup4 — MIT — https://www.crummy.com/software/BeautifulSoup/
+- Pillow — HPND (MIT-CMU) — https://python-pillow.org
+- ReportLab — BSD-3-Clause — https://www.reportlab.com/opensource/
 - PyInstaller — GPL with bootloader redistribution exception; applications
   packaged with PyInstaller are not subject to the GPL
   (https://pyinstaller.org/en/stable/license.html)

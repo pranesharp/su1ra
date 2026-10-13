@@ -6,7 +6,9 @@ async function handle(res) {
     if (typeof body.detail === 'string') detail = body.detail
     else if (body.detail) detail = JSON.stringify(body.detail)
   } catch {}
-  throw new Error(detail)
+  const err = new Error(detail)
+  err.status = res.status
+  throw err
 }
 
 const getJSON = (path) => fetch(path).then(handle)
@@ -75,6 +77,7 @@ export const getBundledPrompt = () => getJSON('/api/system-prompt/bundled')
 export const getPromptFile = () => getJSON('/api/system-prompt/file')
 export const openPromptInEditor = (content) => sendJSON('/api/system-prompt/open', 'POST', { content })
 export const downloadArtifact = (content, filename, extra) => sendJSON('/api/download', 'POST', { content, filename, ...(extra || {}) })
+export const previewFile = (path) => sendJSON('/api/preview', 'POST', { path })
 
 export const deleteModel = (name) => sendJSON(`/api/models/${encodeURIComponent(name)}`, 'DELETE')
 
@@ -83,6 +86,39 @@ export const unloadModel = (model) => sendJSON('/api/models/unload', 'POST', { m
 export const ejectServer = () => sendJSON('/api/eject', 'POST')
 
 export const getGpu = () => getJSON('/api/gpu')
+
+export const getModelCaps = (model) => getJSON(`/api/model/caps?model=${encodeURIComponent(model)}`)
+
+export const attachmentUrl = (id) => `/api/attachments/${id}`
+
+export async function uploadAttachment(conversationId, file) {
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(new Error('could not read file'))
+    reader.readAsDataURL(file)
+  })
+  const comma = dataUrl.indexOf(',')
+  const base64 = dataUrl.slice(comma + 1)
+  const body = await sendJSON('/api/attachments', 'POST', {
+    conversation_id: conversationId,
+    filename: file.name || '',
+    mime: file.type || '',
+    data: base64,
+  })
+  return body.attachment
+}
+
+// Wayland/Hyprland drops arrive as text/uri-list, so the webview cannot read
+// the file — send the path and let the backend read it from disk.
+export async function uploadAttachmentFromPath(conversationId, path, filename) {
+  const body = await sendJSON('/api/attachments/from-path', 'POST', {
+    conversation_id: conversationId,
+    path,
+    filename: filename || '',
+  })
+  return body.attachment
+}
 
 export const mkdirWorkspace = (path) => sendJSON('/api/workspace/mkdir', 'POST', { path })
 
@@ -207,6 +243,33 @@ export async function sendRunInput(runId, text) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ run_id: runId, text }),
+  })
+  if (!res.ok) {
+    let detail = res.statusText
+    try {
+      const errBody = await res.json()
+      if (typeof errBody.detail === 'string') detail = errBody.detail
+    } catch {}
+    throw new Error(detail)
+  }
+  return res.json()
+}
+
+export async function pageInfo(url) {
+  const res = await fetch('/api/page/info', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  })
+  if (!res.ok) throw new Error(res.statusText)
+  return res.json()
+}
+
+export async function pageSummarize(conversationId, url) {
+  const res = await fetch('/api/page/summarize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ conversation_id: conversationId, url }),
   })
   if (!res.ok) {
     let detail = res.statusText

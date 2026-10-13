@@ -92,6 +92,28 @@ function lastCodeBlock(text, lang) {
   return blocks.length ? blocks[blocks.length - 1][1].replace(/\n$/, '') : null
 }
 
+// A code block is an SVG artifact when fenced as ```svg, or when it is a
+// bare/xml block whose root element is <svg>.
+function isSvgBlock(text, lang) {
+  if (lang === 'svg') return true
+  const t = text.trim()
+  return /^<svg[\s>]/i.test(t) || (/^<\?xml/i.test(t) && /<svg[\s>]/i.test(t.slice(0, 400)))
+}
+
+// Sandboxed preview wrapper: checkerboard shows transparency, CSS scales the
+// root <svg> to fit. sandbox="" = no scripts, no same-origin, no forms.
+function svgPreviewDoc(svg) {
+  return (
+    '<!doctype html><html><head><meta charset="utf-8"><style>' +
+    'html,body{margin:0;height:100%}' +
+    'body{display:flex;align-items:center;justify-content:center;' +
+    'background:linear-gradient(45deg,#191922 25%,transparent 25%,transparent 75%,#191922 75%) 0 0/16px 16px,' +
+    'linear-gradient(45deg,#191922 25%,transparent 25%,transparent 75%,#191922 75%) 8px 8px/16px 16px,#101018}' +
+    'svg{max-width:min(100%,420px);max-height:280px;width:auto;height:auto}' +
+    '</style></head><body>' + svg + '</body></html>'
+  )
+}
+
 // Single-doc preview: sibling css/js blocks are inlined so the sandboxed
 // iframe renders styled. Downloads keep them as separate project files.
 function previewDoc(html, css, js) {
@@ -137,7 +159,10 @@ function Linkified({ text }) {
   )
 }
 
+const PAGE_SUMMARY_RE = /^Summarize this web page in under ~300 words\.[^\n]*\n\n--- (.*) ---\n(\S+)\n/
+
 function UserMsg({ m, streaming, onResendFrom }) {
+  const pageSummary = PAGE_SUMMARY_RE.exec(m.content || '')
   const [mark, setMark] = useState(null)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
@@ -181,13 +206,42 @@ function UserMsg({ m, streaming, onResendFrom }) {
   return (
     <div className="msg user">
       <span className="prompt-char">❯</span>
-      <div className="user-text">{m.content}</div>
+      {pageSummary ? (
+        <div className="user-text" title={pageSummary[2]}>// summarize page: {pageSummary[1]}</div>
+      ) : (
+        <div className="user-text">{m.content}</div>
+      )}
+      {m.attachments?.length > 0 && (
+        <div className="user-attachments">
+          {m.attachments.map((a, i) => (
+            <div className="user-attach" key={a.id ?? i}>
+              <div className="attach-title">
+                {a.kind === 'document' ? `[doc ${a.idx || i + 1}]` : `[image ${a.idx || i + 1}]`}
+              </div>
+              {a.kind === 'document' ? (
+                <div className="attach-doc" title={a.filename}>
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+                    <path d="M14 3v5h5" />
+                    <path d="M9 13h6M9 17h6" />
+                  </svg>
+                  <span className="attach-doc-name">{a.filename}</span>
+                </div>
+              ) : (
+                <img className="attach-thumb" src={`/api/attachments/${a.id}`} alt={a.filename || `image ${i + 1}`} />
+              )}
+            </div>
+          ))}
+        </div>
+      )}
       {!streaming && (
         <span className="user-actions">
           <button onClick={doCopy}>
             {mark === 'copied' ? '[ copied ]' : mark === 'failed' ? '[ copy failed ]' : '[ copy ]'}
           </button>
-          <button onClick={() => { setDraft(m.content); setEditing(true) }}>[ edit ]</button>
+          {!pageSummary && (
+            <button onClick={() => { setDraft(m.content); setEditing(true) }}>[ edit ]</button>
+          )}
           <button onClick={() => onResendFrom?.(m)}>[ redo ]</button>
         </span>
       )}
@@ -217,8 +271,9 @@ export function splitThinking(content) {
   return parts
 }
 
-function CodeBlock({ text, lang, className, children, props, onRunCode }) {
+function CodeBlock({ text, lang, className, children, props, onRunCode, onDownloadArtifact, streaming }) {
   const [mark, setMark] = useState(null)
+  const isSvg = !streaming && isSvgBlock(text, lang)
 
   async function doCopy() {
     const ok = await copyText(text)
@@ -234,12 +289,22 @@ function CodeBlock({ text, lang, className, children, props, onRunCode }) {
         <button className="code-copy" onClick={doCopy}>
           {mark === 'copied' ? '[ copied ]' : mark === 'failed' ? '[ copy failed ]' : '[ copy ]'}
         </button>
+        {isSvg && onDownloadArtifact && (
+          <button className="code-run" onClick={() => onDownloadArtifact(text, undefined, undefined, 'svg')}>
+            [ download ]
+          </button>
+        )}
         {lang === 'python' && (
           <button className="code-run" onClick={() => onRunCode && onRunCode(text)}>
             [ run code ]
           </button>
         )}
       </div>
+      {isSvg && (
+        <div className="svg-preview">
+          <iframe className="svg-frame" sandbox="" title="svg preview" srcDoc={svgPreviewDoc(text)} />
+        </div>
+      )}
       <pre>
         <code className={className} {...props}>{children}</code>
       </pre>
@@ -247,7 +312,7 @@ function CodeBlock({ text, lang, className, children, props, onRunCode }) {
   )
 }
 
-function AssistantContent({ content, toolCalls, streaming, onLoadToIde, onRunCode }) {
+function AssistantContent({ content, toolCalls, streaming, onLoadToIde, onRunCode, onDownloadArtifact }) {
   if (!content && !(toolCalls || []).length) return streaming ? <span className="cursor" /> : null
   const parts = splitThinking(content)
   return (
@@ -267,7 +332,7 @@ function AssistantContent({ content, toolCalls, streaming, onLoadToIde, onRunCod
                   const isBlock = className?.includes('language-') || text.includes('\n')
                   if (!isBlock) return <code className={className} {...props}>{children}</code>
                   return (
-                    <CodeBlock text={text} lang={lang} className={className} props={props} onRunCode={onRunCode}>
+                    <CodeBlock text={text} lang={lang} className={className} props={props} onRunCode={onRunCode} onDownloadArtifact={onDownloadArtifact} streaming={streaming}>
                       {children}
                     </CodeBlock>
                   )
@@ -317,7 +382,7 @@ export default function ChatView({ messages, status, streaming, showStats, onLoa
             <p>// type /help for commands, or just start typing</p>
             <p>// before you begin: check /settings — pull models, pick an accent, tune your chat</p>
             <p>// new here? /connect to start ollama → pull a model in /settings → /models &lt;name&gt; to start chatting</p>
-            <p>// use /code for best coding experiences</p>
+            <p>// use /build for decks, docs, sheets & code — best results</p>
             {status && !status.ok && (
               <>
                 <p className="warn">// cannot reach the ollama server — /settings to fix the url</p>
@@ -340,7 +405,7 @@ export default function ChatView({ messages, status, streaming, showStats, onLoa
             ) : (
               <div key={m.id} className="msg assistant">
                 <div className="who">── assistant ─────────────────────────────</div>
-                <AssistantContent content={m.content} toolCalls={m.tool_calls} streaming={streaming} onLoadToIde={onLoadToIde} onRunCode={onRunCode} />
+                <AssistantContent content={m.content} toolCalls={m.tool_calls} streaming={streaming} onLoadToIde={onLoadToIde} onRunCode={onRunCode} onDownloadArtifact={onDownloadArtifact} />
                 {(() => {
                   if (!onDownloadArtifact || streaming) return null
                   const html = lastHtmlBlock(m.content || '')

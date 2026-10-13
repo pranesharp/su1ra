@@ -22,6 +22,7 @@ def _data_dir():
 
 DATA_DIR = _data_dir()
 DB_PATH = DATA_DIR / "app.db"
+ATTACHMENTS_DIR = DATA_DIR / "attachments"
 
 PROMPT_FILENAME = "sysp.txt"
 PROMPT_FILE = DATA_DIR / "system-prompt.txt"
@@ -76,6 +77,22 @@ def init_db():
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS attachments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                message_id INTEGER REFERENCES messages(id) ON DELETE CASCADE,
+                filename TEXT NOT NULL DEFAULT '',
+                mime TEXT NOT NULL DEFAULT '',
+                size INTEGER NOT NULL DEFAULT 0,
+                path TEXT NOT NULL DEFAULT '',
+                idx INTEGER NOT NULL DEFAULT 0,
+                kind TEXT NOT NULL DEFAULT 'image',
+                text TEXT,
+                meta TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
+            CREATE INDEX IF NOT EXISTS idx_attachments_conversation ON attachments(conversation_id);
             """
         )
         columns = [r["name"] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()]
@@ -88,6 +105,13 @@ def init_db():
             conn.execute("ALTER TABLE messages ADD COLUMN stats TEXT")
         if "tool_calls" not in msg_columns:
             conn.execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT")
+        att_columns = [r["name"] for r in conn.execute("PRAGMA table_info(attachments)").fetchall()]
+        if "kind" not in att_columns:
+            conn.execute("ALTER TABLE attachments ADD COLUMN kind TEXT NOT NULL DEFAULT 'image'")
+        if "text" not in att_columns:
+            conn.execute("ALTER TABLE attachments ADD COLUMN text TEXT")
+        if "meta" not in att_columns:
+            conn.execute("ALTER TABLE attachments ADD COLUMN meta TEXT")
         # Seed / refresh the bundled system prompt:
         # - NULL means "never set" -> insert bundled.
         # - An explicitly cleared ("") default is left alone.
@@ -231,6 +255,7 @@ def update_conversation(conversation_id, **fields):
 
 
 def delete_conversation(conversation_id):
+    delete_attachment_files_for_conversation(conversation_id)
     with _connect() as conn:
         cursor = conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
         return cursor.rowcount > 0
@@ -242,6 +267,14 @@ def get_messages(conversation_id):
             "SELECT id, role, content, stats, tool_calls, created_at FROM messages WHERE conversation_id = ? ORDER BY id",
             (conversation_id,),
         ).fetchall()
+        att_rows = conn.execute(
+            "SELECT id, message_id, filename, mime, size, idx, kind, meta FROM attachments "
+            "WHERE conversation_id = ? AND message_id IS NOT NULL ORDER BY idx, id",
+            (conversation_id,),
+        ).fetchall()
+        by_message = {}
+        for a in att_rows:
+            by_message.setdefault(a["message_id"], []).append(_attachment_dict(a))
         return [
             {
                 "id": r["id"],
@@ -249,6 +282,7 @@ def get_messages(conversation_id):
                 "content": r["content"],
                 "stats": json.loads(r["stats"]) if r["stats"] else None,
                 "tool_calls": json.loads(r["tool_calls"]) if r["tool_calls"] else None,
+                "attachments": by_message.get(r["id"], []),
                 "created_at": r["created_at"],
             }
             for r in rows
@@ -270,8 +304,108 @@ def add_message(conversation_id, role, content, stats=None, tool_calls=None):
             "content": row["content"],
             "stats": json.loads(row["stats"]) if row["stats"] else None,
             "tool_calls": json.loads(row["tool_calls"]) if row["tool_calls"] else None,
+            "attachments": [],
             "created_at": row["created_at"],
         }
+
+
+def _attachment_dict(row):
+    keys = set(row.keys())
+    d = {
+        "id": row["id"],
+        "message_id": row["message_id"] if "message_id" in keys else None,
+        "filename": row["filename"],
+        "mime": row["mime"],
+        "size": row["size"],
+        "idx": row["idx"],
+    }
+    if "kind" in keys:
+        d["kind"] = row["kind"]
+    if "meta" in keys:
+        d["meta"] = json.loads(row["meta"]) if row["meta"] else None
+    return d
+
+
+def add_attachment(conversation_id, filename, mime, size, path, kind="image", text=None, meta=None):
+    """Register a stored attachment file. message_id is NULL until it is sent."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            "INSERT INTO attachments (conversation_id, filename, mime, size, path, kind, text, meta) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (conversation_id, filename, mime, size, path, kind, text, json.dumps(meta) if meta else None),
+        )
+        row = conn.execute(
+            "SELECT id, message_id, filename, mime, size, idx, kind, meta FROM attachments WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        return _attachment_dict(row)
+
+
+def get_attachments_for_conversation(conversation_id):
+    """All attachments in a conversation, ordered by their per-chat idx."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, message_id, filename, mime, size, idx, kind, meta FROM attachments "
+            "WHERE conversation_id = ? ORDER BY idx, id",
+            (conversation_id,),
+        ).fetchall()
+        return [_attachment_dict(r) for r in rows]
+
+
+def get_attachment(attachment_id):
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT id, conversation_id, message_id, filename, mime, size, path, idx, kind, text, meta "
+            "FROM attachments WHERE id = ?",
+            (attachment_id,),
+        ).fetchone()
+        if not row:
+            return None
+        d = _attachment_dict(row)
+        d["conversation_id"] = row["conversation_id"]
+        d["path"] = row["path"]
+        d["text"] = row["text"]
+        return d
+
+
+def attach_to_message(attachment_ids, message_id, conversation_id):
+    """Link pending attachments to a sent message, assigning a per-kind,
+    per-conversation idx (1-based, in the order given) so [image N] / [doc N]
+    numbering restarts each conversation and never mixes the two kinds."""
+    if not attachment_ids:
+        return []
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, kind FROM attachments WHERE conversation_id = ? AND message_id IS NULL",
+            (conversation_id,),
+        ).fetchall()
+        kind_of = {r["id"]: (r["kind"] or "image") for r in rows}
+        counters = {}
+        linked = []
+        for aid in attachment_ids:
+            if aid not in kind_of:
+                continue
+            kind = kind_of[aid]
+            counters[kind] = counters.get(kind, 0) + 1
+            conn.execute(
+                "UPDATE attachments SET message_id = ?, idx = ? WHERE id = ?",
+                (message_id, counters[kind], aid),
+            )
+            linked.append(aid)
+        return linked
+
+
+def delete_attachment_files_for_conversation(conversation_id):
+    """Remove on-disk attachment files for a conversation (rows cascade)."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT path FROM attachments WHERE conversation_id = ?", (conversation_id,)
+        ).fetchall()
+    for r in rows:
+        try:
+            Path(r["path"]).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def delete_message_and_following(message_id):
@@ -281,16 +415,38 @@ def delete_message_and_following(message_id):
         ).fetchone()
         if not row:
             return False
+        conv_id = row["conversation_id"]
+        paths = [
+            r["path"]
+            for r in conn.execute(
+                "SELECT path FROM attachments WHERE conversation_id = ? AND message_id >= ?",
+                (conv_id, message_id),
+            ).fetchall()
+        ]
+        conn.execute(
+            "DELETE FROM attachments WHERE conversation_id = ? AND message_id >= ?",
+            (conv_id, message_id),
+        )
         conn.execute(
             "DELETE FROM messages WHERE conversation_id = ? AND id >= ?",
-            (row["conversation_id"], message_id),
+            (conv_id, message_id),
         )
-        return True
+    for p in paths:
+        try:
+            Path(p).unlink(missing_ok=True)
+        except OSError:
+            pass
+    return True
 
 
 def clear_conversation_messages(conversation_id):
     """Drop every message in a conversation, keeping the conversation itself."""
+    delete_attachment_files_for_conversation(conversation_id)
     with _connect() as conn:
+        # Attachment rows are only cascade-deleted when the conversation goes,
+        # so drop them explicitly here too — otherwise they linger with a
+        # dangling message_id and a path to a file we just unlinked.
+        conn.execute("DELETE FROM attachments WHERE conversation_id = ?", (conversation_id,))
         n = conn.execute(
             "DELETE FROM messages WHERE conversation_id = ?", (conversation_id,)
         ).rowcount
@@ -302,5 +458,11 @@ def clear_conversation_messages(conversation_id):
 
 def delete_all_conversations():
     with _connect() as conn:
+        paths = [r["path"] for r in conn.execute("SELECT path FROM attachments").fetchall()]
         n = conn.execute("DELETE FROM conversations").rowcount
-        return n
+    for p in paths:
+        try:
+            Path(p).unlink(missing_ok=True)
+        except OSError:
+            pass
+    return n
