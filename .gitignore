@@ -13,8 +13,8 @@ packaging/dist/
 .abacusai/
 
 #debugging and ai help
-#report/
-#AGENTS.md
+report/
+AGENTS.md
 
 # bundled ollama server (installed via in-app setup)
 ollama/
