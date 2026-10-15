@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -19,6 +20,7 @@ import httpx
 
 import documents
 import doc_builders
+import gpumon
 import ollama
 import ollama_setup
 import pptx_builder
@@ -45,6 +47,131 @@ app = FastAPI(title="Su1ra")
 async def reset_session_settings():
     for key in ("show_stats", "ide_open"):
         store.set_setting(key, "0")
+    start_sysmon()
+
+
+# Held reference — asyncio keeps only weak refs to tasks; an unreferenced
+# sampler can be garbage-collected mid-execution (classic create_task pitfall).
+_sysmon_task = None
+
+
+def start_sysmon():
+    global _sysmon_task
+    if _sysmon_task is None or _sysmon_task.done():
+        _sysmon_task = asyncio.create_task(sysmon_sampler())
+
+
+# --- system monitor (btop-lite) ---------------------------------------------
+# Tiny sampler feeding /api/sysmon: cpu / ram / disk / gpu utilization as
+# 0-100 percents (None = unavailable). Pure stdlib — no psutil, so the frozen
+# build needs nothing new. GPUs come from gpumon.py (Windows: WDDM perf
+# counters — any vendor incl. Intel iGPU/Vulkan; Linux: AMD sysfs + nvidia-smi)
+# as a per-adapter list, integrated GPU first.
+SYSMON = {"cpu": None, "ram": None, "disk": None, "gpu": None, "gpus": []}
+_cpu_last = None
+
+
+def _cpu_percent_now():
+    """Instantaneous CPU utilization from the delta between two calls of this
+    function (the sampler keeps the previous reading in _cpu_last)."""
+    global _cpu_last
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class FT(ctypes.Structure):
+                _fields_ = [("lo", ctypes.c_uint32), ("hi", ctypes.c_uint32)]
+
+                def val(self):
+                    return (self.hi << 32) | self.lo
+
+            idle, kern, user = FT(), FT(), FT()
+            if not ctypes.windll.kernel32.GetSystemTimes(
+                ctypes.byref(idle), ctypes.byref(kern), ctypes.byref(user)
+            ):
+                return None
+            idle_t, total = idle.val(), kern.val() + user.val()
+        else:
+            with open("/proc/stat") as f:
+                parts = f.readline().split()[1:]
+            nums = [int(p) for p in parts]
+            idle_t = nums[3] + (nums[4] if len(nums) > 4 else 0)
+            total = sum(nums)
+        if _cpu_last is None:
+            _cpu_last = (idle_t, total)
+            return None
+        d_idle = idle_t - _cpu_last[0]
+        d_total = total - _cpu_last[1]
+        _cpu_last = (idle_t, total)
+        if d_total <= 0:
+            return None
+        return max(0.0, min(100.0, (1 - d_idle / d_total) * 100))
+    except Exception:
+        return None
+
+
+def _ram_percent():
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class STATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_uint32),
+                    ("dwMemoryLoad", ctypes.c_uint32),
+                    ("ullTotalPhys", ctypes.c_uint64),
+                    ("ullAvailPhys", ctypes.c_uint64),
+                    ("ullTotalPageFile", ctypes.c_uint64),
+                    ("ullAvailPageFile", ctypes.c_uint64),
+                    ("ullTotalVirtual", ctypes.c_uint64),
+                    ("ullAvailVirtual", ctypes.c_uint64),
+                    ("ullAvailExtendedVirtual", ctypes.c_uint64),
+                ]
+
+            st = STATUSEX()
+            st.dwLength = ctypes.sizeof(STATUSEX)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                return None
+            return float(st.dwMemoryLoad)
+        vals = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, v = line.split(":", 1)
+                if k in ("MemTotal", "MemAvailable"):
+                    vals[k] = int(v.strip().split()[0])
+        total, avail = vals.get("MemTotal"), vals.get("MemAvailable")
+        if not total:
+            return None
+        return (total - (avail or 0)) / total * 100
+    except Exception:
+        return None
+
+
+def _disk_percent():
+    try:
+        du = shutil.disk_usage(store.DATA_DIR)  # usage(total, used, free)
+        if not du.total:
+            return None
+        return du.used / du.total * 100
+    except Exception:
+        return None
+
+
+async def sysmon_sampler():
+    while True:
+        SYSMON["cpu"] = _cpu_percent_now()
+        SYSMON["ram"] = _ram_percent()
+        SYSMON["disk"] = _disk_percent()
+        # per-adapter list, iGPU first; "gpu" kept as gpus[0] for old clients
+        gpus = await asyncio.to_thread(gpumon.sample)
+        SYSMON["gpus"] = gpus
+        SYSMON["gpu"] = gpus[0]["util"] if gpus else None
+        await asyncio.sleep(2)
+
+
+@app.get("/api/sysmon")
+async def sysmon_get():
+    return dict(SYSMON)
 
 
 app.add_middleware(
@@ -59,6 +186,70 @@ RUN_PTY = {}
 TIMEOUT_SECONDS = 30
 TERM_OUTPUT_CAP = 5 * 1024 * 1024
 HAS_PTY = os.name == "posix"
+
+# --- editor run: file-type → interpreter ------------------------------------
+# The editor pane saves the buffer to a real file in scratch/ and executes it
+# by extension, like a text editor's run button. Interpreters are resolved at
+# request time; a missing one is a clean 422, never a crash.
+
+_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,80}$")
+
+
+def python_exe():
+    """A real python interpreter. Frozen: sys.executable is the app exe, NOT
+    python (spawning it would relaunch Su1ra) — fall back to PATH/launcher."""
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    for cand in (shutil.which("python"), shutil.which("python3"), shutil.which("py")):
+        if cand:
+            return cand
+    return None
+
+
+def build_run_argv(filename):
+    """argv to run scratch/<filename>, or (None, reason) if not runnable."""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext == ".py":
+        exe = python_exe()
+        if not exe:
+            return None, "no python interpreter found on this machine"
+        return [exe, "-u", filename], {"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+    if ext in (".js", ".mjs", ".cjs"):
+        exe = shutil.which("node")
+        if not exe:
+            return None, "node is not installed (or not on PATH)"
+        return [exe, filename], {}
+    if ext in (".sh", ".bash"):
+        exe = shutil.which("bash") or shutil.which("sh")
+        if not exe:
+            return None, "no POSIX shell found on this machine"
+        return [exe, filename], {}
+    if ext == ".ps1":
+        exe = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+        if not exe:
+            return None, "powershell not found"
+        return [exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", filename], {}
+    if ext in (".bat", ".cmd"):
+        exe = shutil.which("cmd.exe")
+        if not exe:
+            return None, "cmd.exe not found"
+        return [exe, "/c", filename], {}
+    if ext == ".rb":
+        exe = shutil.which("ruby")
+        if not exe:
+            return None, "ruby is not installed (or not on PATH)"
+        return [exe, filename], {}
+    if ext == ".pl":
+        exe = shutil.which("perl")
+        if not exe:
+            return None, "perl is not installed (or not on PATH)"
+        return [exe, filename], {}
+    if ext == ".lua":
+        exe = shutil.which("lua") or shutil.which("luajit")
+        if not exe:
+            return None, "lua is not installed (or not on PATH)"
+        return [exe, filename], {}
+    return None, f".{ext.lstrip('.') or '?'} files are saved but not runnable here"
 
 MAX_TOOL_ROUNDS = 3
 MAX_RESULT_CHARS = 12000
@@ -508,6 +699,7 @@ class ConversationCreate(BaseModel):
     temperature: float = 0.7
     context_length: int = 0
     think: bool | str | None = None
+    code_mode: bool = False
 
 
 class ConversationUpdate(BaseModel):
@@ -517,6 +709,7 @@ class ConversationUpdate(BaseModel):
     temperature: float | None = None
     context_length: int | None = None
     think: bool | str | None = None
+    code_mode: bool | None = None
 
 
 class SettingsUpdate(BaseModel):
@@ -527,6 +720,7 @@ class SettingsUpdate(BaseModel):
     ide_width: int | None = None
     sandbox_tools: bool | None = None
     default_system_prompt: str | None = None
+    default_system_prompt_casual: str | None = None
     default_temperature: float | None = None
     default_context_length: int | None = None
     default_think: bool | str | None = None
@@ -546,7 +740,7 @@ class SettingsUpdate(BaseModel):
 
 class RunRequest(BaseModel):
     code: str
-    language: str = "python"
+    filename: str = "scratch.py"
 
 
 class RunInput(BaseModel):
@@ -919,6 +1113,7 @@ async def get_settings():
         "ide_width": int(store.get_setting("ide_width") or 460),
         "sandbox_tools": store.get_setting("sandbox_tools") != "0",
         "default_system_prompt": store.get_setting("default_system_prompt") or "",
+        "default_system_prompt_casual": store.get_setting("default_system_prompt_casual") or "",
         "default_temperature": float(store.get_setting("default_temperature") or 0.7),
         "default_context_length": int(store.get_setting("default_context_length") or 0),
         "default_think": store.get_setting("default_think") or None,
@@ -975,6 +1170,8 @@ async def update_settings(body: SettingsUpdate):
             store.set_setting("default_think", think)
     if body.default_system_prompt is not None:
         store.set_setting("default_system_prompt", body.default_system_prompt)
+    if body.default_system_prompt_casual is not None:
+        store.set_setting("default_system_prompt_casual", body.default_system_prompt_casual)
     if body.default_temperature is not None:
         store.set_setting("default_temperature", str(body.default_temperature))
     if body.default_context_length is not None:
@@ -1130,7 +1327,8 @@ async def create_conversation(body: ConversationCreate):
     except ValueError as exc:
         raise HTTPException(422, str(exc))
     return store.create_conversation(
-        body.title, body.model, body.system_prompt, body.temperature, body.context_length, think
+        body.title, body.model, body.system_prompt, body.temperature, body.context_length, think,
+        code_mode=body.code_mode,
     )
 
 
@@ -1150,6 +1348,7 @@ async def update_conversation(conversation_id: int, body: ConversationUpdate):
         system_prompt=body.system_prompt,
         temperature=body.temperature,
         context_length=body.context_length,
+        code_mode=body.code_mode,
     )
     if body.think is not None:
         try:
@@ -1282,7 +1481,15 @@ async def chat(body: ChatRequest):
     think = body.think if body.think is not None else conversation.get("think")
     # The stored system prompt only applies in code mode — casual chats
     # go out with no system prompt.
-    sys_prompt = conversation["system_prompt"] if body.code_mode else ""
+    # System prompts are per-mode: build carries the bundled sysp.txt default
+    # (settings key default_system_prompt), casual carries its own default
+    # (default_system_prompt_casual — empty out of the box). A non-empty
+    # per-chat override wins in either mode.
+    per_chat = (conversation["system_prompt"] or "").strip()
+    if body.code_mode:
+        sys_prompt = per_chat or (store.get_setting("default_system_prompt") or "")
+    else:
+        sys_prompt = per_chat or (store.get_setting("default_system_prompt_casual") or "")
     if tools:
         ws_rules = (
             f"Workspace: ROOT={workspace.root()} PROJECT={workspace.project_dir()}. "
@@ -1416,6 +1623,12 @@ async def chat(body: ChatRequest):
                     arguments = {}
                 code = str(arguments.get("code") or "") if name == "run_python" else ""
                 ws_path = str(arguments.get("path") or "")
+                # Defaults first: no dispatch branch may leave these unbound
+                # (a missing assignment used to raise UnboundLocalError after
+                # tool_start and silently kill the stream), and a later tool
+                # call must never reuse the previous call's result text.
+                result = None
+                result_text = f"[internal error: tool '{name}' produced no result — tell the user and continue]"
                 yield json.dumps({"tool_start": {"name": name}}) + "\n"
                 if name == "run_python":
                     try:
@@ -1460,6 +1673,7 @@ async def chat(body: ChatRequest):
                             )
                         else:
                             ws_res = workspace.mkdir(ws_path)
+                        if name != "ws_cd":
                             result = {"exit": 0 if ws_res.get("ok") else 1, "ws": ws_res}
                             result_text = format_ws_result(ws_res)
                         if name in ("ws_cd", "ws_mkdir"):
@@ -1559,12 +1773,18 @@ async def run(body: RunRequest):
     run_id = uuid.uuid4().hex
     if not body.code.strip():
         raise HTTPException(422, "Empty code")
-    if body.language != "python":
-        raise HTTPException(422, "Only python is supported")
-    scratch = store.DATA_DIR / "scratch"
-    scratch.mkdir(parents=True, exist_ok=True)
+    # subpath-aware ('proj/main.py'); traversal-safe; cwd = the file's parent
+    target = _editor_rel_path(body.filename)
+    argv, env_over = build_run_argv(target.name)
+    if argv is None:
+        raise HTTPException(422, env_over)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    scratch = target.parent
+    # Save the buffer to a REAL file first — runs respect the file type and
+    # get __file__ / sibling imports / shebangs, like a text editor would.
+    target.write_text(body.code, encoding="utf-8", newline="\n")
     if HAS_PTY:
-        return StreamingResponse(pty_generator(run_id, body.code, scratch), media_type="application/x-ndjson")
+        return StreamingResponse(pty_generator(run_id, argv, scratch, env_over), media_type="application/x-ndjson")
 
     async def legacy_generator():
         proc = None
@@ -1579,15 +1799,13 @@ async def run(body: RunRequest):
         try:
             yield json.dumps({"run": run_id}) + "\n"
             proc = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-u",
-                "-c",
-                body.code,
+                argv[0],
+                *argv[1:],
                 cwd=scratch,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},
+                env={**os.environ, **env_over},
             )
             RUN_STDIN[run_id] = proc.stdin
             queue = asyncio.Queue()
@@ -1672,8 +1890,8 @@ def term_note(text):
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
-async def pty_generator(run_id, code, scratch):
-    sess = ptyrunner.PtySession(code, scratch)
+async def pty_generator(run_id, argv, scratch, env_over):
+    sess = ptyrunner.PtySession(argv, scratch, env_over)
     try:
         sess.start()
     except Exception as exc:
@@ -1739,6 +1957,122 @@ async def run_input(body: RunInput):
     except Exception as exc:
         raise HTTPException(409, f"Cannot write to stdin: {exc}")
     return {"ok": True}
+
+
+class EditorFileBody(BaseModel):
+    code: str
+    filename: str = "scratch.py"
+
+
+# --- editor scratch root -----------------------------------------------------
+# The editor's files live in ~/Documents/.scratch — user-visible, app-folder
+# vibes (dot-prefixed). Sub-folders are allowed (user-made); every path goes
+# through _editor_rel_path which rejects traversal and resolves inside the
+# root. The legacy flat %APPDATA% scratch dir migrates once, by copy.
+
+def editor_root():
+    docs = Path.home() / "Documents"
+    root = docs / ".scratch"
+    _migrate_legacy_scratch(root)
+    return root
+
+
+def _migrate_legacy_scratch(root):
+    if getattr(editor_root, "_migrated", False) or root.exists():
+        editor_root._migrated = True
+        return
+    legacy = store.DATA_DIR / "scratch"
+    if legacy.is_dir():
+        root.mkdir(parents=True, exist_ok=True)
+        for f in legacy.iterdir():
+            if f.is_file():
+                shutil.copy2(f, root / f.name)
+    editor_root._migrated = True
+
+
+def _editor_rel_path(filename):
+    """Validate a slash-separated relative path ('a/b.py'); returns the
+    resolved absolute path INSIDE the editor root or raises HTTPException."""
+    filename = (filename or "").strip().replace("\\", "/").lstrip("/")
+    if not filename:
+        raise HTTPException(422, "Empty filename")
+    for part in filename.split("/"):
+        if part in ("", ".", ".."):
+            raise HTTPException(422, f"Bad path segment: {part!r}")
+        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,80}$", part):
+            raise HTTPException(422, f"Bad filename: {part!r}")
+    target = (editor_root() / filename).resolve()
+    root = editor_root().resolve()
+    if target != root and root not in target.parents:
+        raise HTTPException(422, "Path escapes the scratch folder")
+    return target
+
+
+_EDITOR_OPEN_CAP = 400_000  # chars — refuse to open monsters into the buffer
+
+
+@app.post("/api/editor/file")
+async def save_editor_file(body: EditorFileBody):
+    """Save an editor buffer into the scratch root (subfolders allowed)."""
+    target = _editor_rel_path(body.filename)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body.code, encoding="utf-8", newline="\n")
+    return {"ok": True, "path": str(target)}
+
+
+@app.get("/api/editor/open")
+async def open_editor_file(path: str):
+    """Load a scratch file back into the buffer."""
+    target = _editor_rel_path(path)
+    if not target.is_file():
+        raise HTTPException(404, f"No such file: {path}")
+    content = target.read_text(encoding="utf-8", errors="replace")
+    if len(content) > _EDITOR_OPEN_CAP:
+        raise HTTPException(422, f"File too large to open ({len(content)} chars, cap {_EDITOR_OPEN_CAP})")
+    # rel is slash-normalized — the frontend uses it as the buffer's filename
+    rel = target.relative_to(editor_root()).as_posix()
+    return {"ok": True, "path": str(target), "rel": rel, "content": content}
+
+
+@app.post("/api/editor/mkdir")
+async def editor_mkdir(body: EditorFileBody):
+    target = _editor_rel_path(body.filename)
+    target.mkdir(parents=True, exist_ok=True)
+    return {"ok": True, "path": str(target)}
+
+
+@app.get("/api/editor/tree")
+async def editor_tree():
+    """Recursive file tree for the explorer (caps: depth 5, 800 entries)."""
+    root = editor_root()
+    root.mkdir(parents=True, exist_ok=True)
+    out = {"name": "", "dirs": [], "files": []}
+    budget = {"n": 800}
+
+    def _fill(dir_path, node, depth):
+        if depth > 5 or budget["n"] <= 0:
+            return
+        try:
+            entries = sorted(dir_path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+        except OSError:
+            return
+        for entry in entries:
+            if budget["n"] <= 0:
+                return
+            budget["n"] -= 1
+            if entry.is_dir():
+                sub = {"name": entry.name, "dirs": [], "files": []}
+                _fill(entry, sub, depth + 1)
+                node["dirs"].append(sub)
+            else:
+                try:
+                    size = entry.stat().st_size
+                except OSError:
+                    size = 0
+                node["files"].append({"name": entry.name, "size": size})
+
+    _fill(root, out, 1)
+    return out
 
 
 class DownloadBody(BaseModel):

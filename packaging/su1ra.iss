@@ -1,5 +1,5 @@
 #define AppName "Su1ra"
-#define AppVersion "0.3.1"
+#define AppVersion "0.3.2"
 #define AppPublisher "ganpat"
 
 [Setup]

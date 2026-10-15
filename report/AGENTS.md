@@ -1,4 +1,4 @@
-# AGENTS.md — Su1ra v0.3.1
+# AGENTS.md — Su1ra v0.3.2
 
 Local-first, terminal-styled desktop chat app for Ollama models. Everything runs on
 the user's machine: React+Vite frontend, FastAPI backend (:8000), pywebview desktop
@@ -30,7 +30,7 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
   (streamTargetRef — deltas target the streaming assistant BY ID; onTool attaches
   by role), background model eviction (`unloadInBackground`)
 - `frontend/src/components/` — ChatView (markdown+math, user msg copy/edit/redo),
-  IdePane (xterm.js), ArtifactPane (sandboxed iframe; shows file path in workspace
+  EditorPane (CodeMirror 6 buffer + xterm output; was IdePane), ArtifactPane (sandboxed iframe; shows file path in workspace
   mode), ModelHub (catalog), OllamaSetup (first-run callout + troubleshooting
   bridge), SettingsModal (autosave), TitleBar (floating window controls — auto-hides
   without js_api), theme.js
@@ -42,23 +42,62 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
 
 ## Modes & loadouts (core V2 concept)
 
-- **casual** vs **code** mode. Per-mode loadout: model, context length, think
-  on/off, system prompt (code mode appends the file-workflow directive).
+- **casual** vs **build** mode. Per-mode loadout: model, context length, think
+  on/off, system prompt (build mode appends the file-workflow directive).
+- **System prompts are per-mode (2026-10-15):** build default = sysp.txt seed
+  (`default_system_prompt`); casual default = `default_system_prompt_casual`
+  (ships EMPTY — user's choice). Resolution: per-chat override → else mode
+  default; empty = no system role sent. SettingsModal is mode-aware (mode prop)
+  and saves with `systemPromptScope` 'default'|'chat' — default edits never
+  re-stamp the open chat. NEVER stamp a global default into a new conversation's
+  `system_prompt` at create time (that was the leak; one-time normalization
+  `perchat_sysp_norm` cleared old stamps, customs survive).
+- **Mode is persisted per conversation** (`conversations.code_mode`, 0/1):
+  createConversation passes it (birth mode). **Mode switch = new chat**:
+  `/build` (both toggle directions) and `/casual` call `startModeChat` — a
+  fresh chat on the new desk; the chat being left keeps its mode/history
+  (an EMPTY chat with zero messages is retagged + reused instead). **Opening
+  a chat follows the chat** — `selectConversation` flips codeArmed + picker/
+  new-chat defaults to its mode's loadout (light switch: no settings rewrite,
+  no forced IDE). `/chats` renders TWO columns (BUILD left, CASUAL right)
+  from `code_mode`; ordinals stay global for `/chats <n|id>`.
+- **Naming (2026-10-13):** the mode the user sees is **build** (`/build`) — renamed
+  from "code" because it covers decks/docs/sheets/SVGs, not just code. INTERNAL
+  identifiers keep the old names on purpose (no DB/API migration): API field
+  `code_mode`, settings keys `loadout_code_model`/`loadout_code_ctx`, JS
+  `codeArmed`/`codeMode`/`leaveCodeMode`. `/code` still works as a hidden alias
+  (handled in the same App.jsx branch, not listed in COMMANDS).
 - `/modes` prints mode + effective model + ctx/think/tools/sysprompt/engine.
-  Header shows `· casual/code · model: ... · think: ...`.
+  Header shows `· casual/build · model: ... · think: ...`.
 - Startup boots to a fresh **casual** desk (no chat auto-opened; history in /chats).
 - Switching modes unloads the other loadout's resident model via
   `POST /api/models/unload` (keep_alive: 0) — **fire-and-forget in background**
   (`unloadInBackground`), only when models differ, never on /newchat/boot.
   Optimistic UI first (mode switch must never await eviction).
-- `/casual` exits code mode (shared `leaveCodeMode` path with /code-off).
+- `/casual` exits build mode (shared `leaveCodeMode` path).
 
-## /code mode + workspace
+## /build mode + workspace
 
 - Tools offered ONLY when `body.tools and body.code_mode` — **strict server-side
   gating**; the old ```python auto-arm in casual was removed.
-- 5 workspace tools registered (ws_ls/ws_read/ws_write/ws_edit/ws_mkdir);
+- 6 workspace tools registered (ws_ls/ws_read/ws_write/ws_edit/ws_mkdir/ws_cd);
   `run_python` cwd = active project dir.
+- **Project rule (2026-10-13):** the model starts every new project in a NEW
+  folder via `ws_cd <name>` (mkdir-if-missing + switch in one call) — it never
+  writes into the workspace root or silently reuses the active project.
+  `active_project` is a global setting, so a model-driven ws_cd switches it
+  for the whole app; the frontend header syncs from the ws_cd tool event.
+- `build_pptx` tool (added 2026-10-13, `backend/pptx_builder.py`): model sends a
+  JSON outline (filename/theme/slides), the BACKEND renders the .pptx — the model
+  never touches coordinates. Writes `<stem>.pptx` + `<stem>.preview.html` (a
+  self-contained slide player) into the project dir; same filename = regenerate
+  in place (that IS the revision loop). The tool event reports the player html
+  as `path`, so the frontend artifact bridge opens it in the preview pane.
+  One theme/layout dict feeds BOTH the pptx and the player (preview px = slide
+  pt, 960x540 stage = 13.333x7.5in at 72px/in) — keep them in sync there.
+  Runs in-process (like ws_* tools), not through run_python — no sandbox
+  involved. Outline errors raise `OutlineError` → tool text tells the model
+  how to fix. `run_python` remains the escape hatch for exotic pptx needs.
 - Auto-context injection: live project listing (60 cap) + a mandatory "call
   ws_ls/ws_read first" trigger sentence appended to sys_prompt every code-mode turn;
   no-project case injects /mkdir+/cd guidance instead. Best-effort, never breaks
@@ -137,6 +176,22 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
   extended-limit struct — basic class rejects with err 87) + scoped child-reap;
   closes the llama-server.exe orphan/leak class. Linux: killpg.
 - `/eject` also kills `llama-server.exe`.
+- **Sysmon (2026-10-15):** `/api/sysmon` + background sampler (2s, pure stdlib
+  — no psutil) in main.py; `SysMonitor.jsx` renders 2x2 SEGMENTED meters (10 fixed-px
+  blocks between [ ], ghost blocks when idle; G/M/D/C, colors from the
+  accent-derived hue family (G = accent, M = --h-b, D = --h-c, C = --h-d —
+  NOT hardcoded green/amber/blue anymore; inline `--sm-c` per cell),
+  no numbers, tooltip only; NEVER %-width fills inside the shrink-to-fit track —
+  that rendered every bar at 0px). States: live / unavailable (flat line) /
+  offline (cluster dimmed) fixed bottom-left in the
+  composer foot; hidden < 1180px. GPUs: `backend/gpumon.py` (in spec
+  hiddenimports) → `gpus` list, iGPU FIRST. Windows = DXGI EnumAdapters1
+  (ctypes vtable: factory slot 12, GetDesc1 slot 10; skip software adapter)
+  + PDH `\GPU Engine(*)\Utilization Percentage` (sum per engine, adapter =
+  busiest engine — Task Manager rule; any vendor incl. Intel iGPU/Vulkan) +
+  `GPU Adapter Memory` for the tooltip. Linux = AMD sysfs + nvidia-smi.
+  Layout: col1 = M then G_{n-1}..G₁, G₀ at the BOTTOM (extra GPUs stack
+  upward on G₀); col2 = D over C; columns bottom-aligned. shutil.disk_usage has NO `.percent` — compute used/total.
 - pywebview **frameless chrome is PARKED**: flaky WinForms init race in pywebview
   6.2.1 (app hang, black window, intermittent — bisected clean at every step).
   Do not retry without a newer pywebview or different shell. Mitigations that stay:
@@ -152,13 +207,51 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
   inside the modal needs a `.modal`-scoped override or it stretches and crushes
   flex siblings (broke the ctx slider once; commit 0d65371).
 - `.gitattributes` marks `yarn.lock` linguist-generated.
+- `body.pane-resizing .ide-pane { pointer-events: none }` (pane-drag mute)
+  reaches INSIDE the pane and kills the `.ide-split` drag row — keep the
+  override `body.pane-resizing .ide-split { pointer-events: auto }`.
 
 ## Command surface
 
 /help · /models (+ `pull <name>`, `get [query]`) · /chats · /delchat (<n|id>, `all`
 wipes everything) · /clear (current chat messages only, chat + settings kept) ·
-/newchat · /code (toggle; `<msg>` one-shot) · /casual · /modes · /mkdir · /cd ·
-/settings · /stats · /ide · /eject · /connect · /web <url|query>
+/newchat · /build (toggle; `<msg>` one-shot; /code hidden alias) · /casual · /modes · /mkdir · /cd ·
+/settings · /stats · /editor (/ide alias) · /eject · /connect · /web <url|query>
+
+## Editor pane (2026-10-15 — renamed from /ide, general-purpose)
+
+- **v2 same day:** files live in `~/Documents/.scratch` (`editor_root()`; the
+  legacy APPDATA scratch is copied over once). Subpaths are first-class:
+  `_editor_rel_path` validates per segment (no `..`), run cwd = the file's
+  PARENT dir (sibling imports), save auto-creates parents. `/api/editor/open`
+  reads a file back into the buffer (400k cap; `rel` is `as_posix()`), 
+  `/api/editor/tree` = recursive listing (depth 5, 800 entries), 
+  `/api/editor/mkdir` makes folders or empty files. Frontend: CodeMirror 6
+  (basicSetup + per-ext lang; theme Compartment follows data-mode; Mod-s
+  keymap + window ctrl+s), explorer sidebar (open / [+file] / [+dir]),
+  dirty = `code !== snapshot` → `· unsaved` marker. run() reads `codeRef`.
+- `/editor` toggles the right pane (hidden `/ide` alias kept). Settings keys
+  STAY `ide_open`/`ide_width` (DB compat — same precedent as `code_mode`).
+  Component: `EditorPane.jsx`; state editorOpen/editorWidth/editorCode/editorName.
+- The buffer belongs to a FILENAME (header input, default scratch.py). Run
+  SAVES the buffer to `<DATA_DIR>/scratch/<filename>` and executes the FILE by
+  extension: .py → python (frozen-aware `python_exe()` — sys.executable in the
+  bundled exe is su1ra.exe, NOT python; fall back PATH python/py), .js/.mjs/.cjs
+  → node, .sh/.bash → bash/sh, .ps1 → powershell -File, .bat/.cmd → cmd /c,
+  .rb/.pl/.lua. Missing interpreter / non-runnable ext (md, txt, json…) →
+  clean 422 (frontend disables run: "save only"). Filename validated by
+  `_FILENAME_RE` (basename, no traversal). `POST /api/editor/file` saves
+  without running. Legacy (non-PTY/Windows) path spawns argv with 30s cap;
+  Linux PtySession now takes (argv, cwd, env) — generic exec, was python -c.
+  attachEditorRun labels `// attached: editor run — <file> (exit n)` with
+  ext-matched fence.
+- **btop panels (2026-10-15):** every pane section is a `.panel.h-a/b/c`
+  box (scratch explorer=h-b, code editor=h-a, output=h-c) with punched
+  `.panel-title` + `Corners()` glyphs (┌┐└┘ on the border line). Panel hue
+  = one custom prop `--ph` / `--ph-line`; the four hues come from
+  `theme.js` `deriveHueFamily(accent)` (analogous rotations +45/−50/+105,
+  sat damped) set by `applyAccent()` as `--h-a/b/c/d` — recolors the whole
+  system on every accent pick.
 
 ## History semantics
 
@@ -189,7 +282,7 @@ wipes everything) · /clear (current chat messages only, chat + settings kept) �
   svg, sysp.txt. The exe is tracked in git BY USER CHOICE (rebuilds add ~19 MB each
   to history — revisit if the repo balloons).
 - Distribution: github.com/pranesharp/su1ra (public), tag v0.2.0 pushed. Pending:
-  v0.3.0 release + SHA256 checksums + terminal-styled landing page wired to
+  v0.3.1 release + SHA256 checksums + terminal-styled landing page wired to
   `releases/latest/download/Su1ra-setup-x64.exe`.
 
 ## Parked / someday (from report/report/fplan.md)
@@ -198,3 +291,38 @@ wipes everything) · /clear (current chat messages only, chat + settings kept) �
 - /mkdir scaffolding contents · history-stripping of superseded artifacts ·
   preview scroll/slide-state preservation · WSL execution backend toggle ·
   frameless chrome revisit · real .pptx path (python-pptx)
+
+## Arch/Linux fresh-machine setup (learned 2026-10-13)
+
+- System needs: gtk3, webkit2gtk-4.1, python-gobject (pacman). The venv hides system
+  site-packages by default, so `import gi` fails inside .venv even with python-gobject
+  installed — bridge it: echo "/usr/lib/python3.14/site-packages" >
+  .venv/lib/python3.14/site-packages/system-gi.pth (or create the venv with
+  --system-site-packages). Verify: `gi.require_version('WebKit2','4.1')` imports.
+- Desktop boot sequence in the log: backend ready → ollama detected → ollama ready.
+- Engine install via in-app flow proven on this machine: real 1.44 GB stream, extract,
+  spawn from <app>/ollama/bin/ollama; models in ~/.ollama survive engine removal.
+
+## NEXT SESSION STARTS HERE (2026-10-13 handoff)
+
+- Machine state: venv built (.venv, pyinstaller incl.), UI built, engine installed via
+  the IN-APP flow (1.44 GB, spawns <app>/ollama/bin/ollama v0.40.3), desktop.py boots
+  clean (backend ready → ollama detected → ollama ready). Models present:
+  gemma4:e4b, deepseek-r1:1.5b (ornith-1.5:9b NOT in this machine's manifests —
+  re-pull via hub if needed). Arch setup gotchas in the section above (gi/.pth bridge).
+- Working tree: only frontend/yarn.lock modified (line endings from clone) — safe to
+  checkout. Nothing of ours is uncommitted except local-only files (AGENTS.md, report/).
+- Sandbox task (WSL-on-Windows) is WRITTEN UP AND PARKED on purpose:
+  report/report/sandbox-wsl-task.md — do not start it unless the user asks; they will
+  do it later with a different agent, possibly on the Windows boot.
+- Queued next (user's list, not started): v0.3.2 GitHub release + SHA256 checksums +
+  terminal-styled landing page wired to releases/latest; npm-vs-yarn decision (README
+  says yarn, package-lock.json tracked, npm absent on this Arch box — yarn used here);
+  user said "new bug reports coming" (their reporttest.md items are marked PAST — wait
+  for fresh reports).
+- Browser pane bug (link clicks replacing the app) RESOLVED late 2026-10-13, plus
+  follow-ups (Bing unwrap, compact summarize line, fresh-boot summarize 422, divider
+  drag). Fresh-boot summarize + divider drag await user confirmation. See the
+  "/web browser pane" section above and the end of report/report/session-log.md.
+- User communicates goals + discusses before builds; verify UI claims by clicking
+  through the live app (backend serves built UI on :8000 — most reliable surface).

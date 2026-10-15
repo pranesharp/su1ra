@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import SysMonitor from './SysMonitor'
 
 const DOC_ACCEPT =
   '.pdf,.docx,.pptx,.xlsx,.xlsm,.txt,.md,.csv,.tsv,.json,.yaml,.yml,.xml,.html,.htm,.css,' +
@@ -276,10 +277,13 @@ export default function Composer({
           </div>
         )}
       </div>
-      <div className="composer-hint">
-        {codeArmed ? '// tools armed — files + python enabled · ' : ''}
-        {vision ? 'drop or paste images · ' : ''}
-        enter to send · shift+enter for newline · /help for commands
+      <div className="composer-foot">
+        <SysMonitor />
+        <div className="composer-hint">
+          {codeArmed ? '// tools armed — files + python enabled · ' : ''}
+          {vision ? 'drop or paste images · ' : ''}
+          enter to send · shift+enter for newline · /help for commands
+        </div>
       </div>
     </div>
   )

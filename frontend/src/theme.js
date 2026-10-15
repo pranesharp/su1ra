@@ -34,6 +34,69 @@ function hexToRgb(hex) {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
 }
 
+function rgbToHex(r, g, b) {
+  return '#' + [r, g, b].map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('')
+}
+
+// btop-style panel hues: an ANALOGOUS family derived from the accent, so
+// every theme gets in-family variation (crimson → raspberry/teal; amber →
+// gold/green) instead of random colors. --h-a IS the accent; b/c/d rotate
+// the hue (and calm the saturation a touch) for panel borders/titles/bars.
+export function deriveHueFamily(hex) {
+  const [r, g, b] = hexToRgb(hex).map((v) => v / 255)
+  const max = Math.max(r, g, b)
+  const min = Math.min(r, g, b)
+  const l = (max + min) / 2
+  const d = max - min
+  let h = 0
+  const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1))
+  if (d !== 0) {
+    if (max === r) h = 60 * (((g - b) / d) % 6)
+    else if (max === g) h = 60 * ((b - r) / d + 2)
+    else h = 60 * ((r - g) / d + 4)
+  }
+  if (h < 0) h += 360
+  const wrap = (x) => (x % 360 + 360) % 360
+  const mk = (hue, satF = 1, lightF = 1) => {
+    const s2 = Math.min(0.85, s * satF)
+    const l2 = Math.max(0.2, Math.min(0.72, l * lightF + 0.12))
+    const c = (1 - Math.abs(2 * l2 - 1)) * s2
+    const x = c * (1 - Math.abs(((hue / 60) % 2) - 1))
+    const m = l2 - c / 2
+    const seg = Math.floor(hue / 60) % 6
+    const [r1, g1, b1] = [
+      [c, x, 0],
+      [x, c, 0],
+      [0, c, x],
+      [0, x, c],
+      [x, 0, c],
+      [c, 0, x],
+    ][seg]
+    return rgbToHex((r1 + m) * 255, (g1 + m) * 255, (b1 + m) * 255)
+  }
+  return {
+    a: hex, // the accent itself
+    b: mk(wrap(h + 45), 0.8), // analogous clockwise
+    c: mk(wrap(h - 50), 0.75), // analogous counter-clockwise
+    d: mk(wrap(h + 105), 0.6), // a third relative, calmer
+  }
+}
+
+export function applyAccent(hex) {
+  const root = document.documentElement.style
+  root.setProperty('--accent', hex)
+  root.setProperty('--accent-bright', mix(hex, '#ffffff', 0.3))
+  root.setProperty('--accent-soft', alpha(hex, 0.12))
+  root.setProperty('--accent-text', mix(hex, '#000000', 0.82))
+  root.setProperty('--user-bubble', alpha(hex, 0.16))
+  // btop panel family — rotates with every accent pick
+  const fam = deriveHueFamily(hex)
+  root.setProperty('--h-a', fam.a)
+  root.setProperty('--h-b', fam.b)
+  root.setProperty('--h-c', fam.c)
+  root.setProperty('--h-d', fam.d)
+}
+
 function mix(hex, target, p) {
   const a = hexToRgb(hex)
   const b = hexToRgb(target)
@@ -44,15 +107,6 @@ function mix(hex, target, p) {
 function alpha(hex, p) {
   const [r, g, b] = hexToRgb(hex)
   return `rgba(${r}, ${g}, ${b}, ${p})`
-}
-
-export function applyAccent(hex) {
-  const root = document.documentElement.style
-  root.setProperty('--accent', hex)
-  root.setProperty('--accent-bright', mix(hex, '#ffffff', 0.3))
-  root.setProperty('--accent-soft', alpha(hex, 0.12))
-  root.setProperty('--accent-text', mix(hex, '#000000', 0.82))
-  root.setProperty('--user-bubble', alpha(hex, 0.16))
 }
 
 export const DEFAULT_BRIGHTNESS = 100

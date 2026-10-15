@@ -19,6 +19,7 @@ a = Analysis(
         "documents",
         "pptx_builder",
         "doc_builders",
+        "gpumon",
         "pypdf",
         "docx",
         "pptx",

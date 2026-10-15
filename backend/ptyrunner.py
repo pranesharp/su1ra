@@ -6,21 +6,24 @@ import sys
 
 
 class PtySession:
-    def __init__(self, code, cwd):
-        self.code = code
+    def __init__(self, argv, cwd, env=None):
+        """Run argv (a file on disk) in a real PTY. argv[0] must be absolute
+        or resolvable on PATH; env overrides are layered over os.environ."""
+        self.argv = argv
         self.cwd = str(cwd)
+        self.env = {**os.environ, **(env or {})}
         self.pid = None
         self.master_fd = None
         self.stop_deadline = None
         self._exit = None
 
     def start(self):
-        env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8", "TERM": "xterm-256color"}
+        env = {**self.env, "TERM": "xterm-256color"}
         pid, master_fd = pty.fork()
         if pid == 0:
             try:
                 os.chdir(self.cwd)
-                os.execve(sys.executable, [sys.executable, "-u", "-c", self.code], env)
+                os.execve(self.argv[0], self.argv, env)
             except BaseException:
                 os._exit(127)
         self.pid = pid

@@ -1,4 +1,4 @@
-# Su1ra (सूत्र) — v0.3.1
+# Su1ra (सूत्र) — v0.3.2
 
 THE BEST harness for your LOCAL AI agentic work - simple UI for simple setup and simple work right away.
 A local, cli style app for [Ollama][Backend] (: https://ollama.com) models. Removing the hassle of setting up agentic and tool calls externally for Ollama.

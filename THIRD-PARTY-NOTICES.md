@@ -37,6 +37,7 @@ Ollama project.
 - react-markdown, remark-gfm, remark-math, rehype-katex — MIT — https://github.com/remarkjs
 - KaTeX (incl. bundled fonts) — MIT — https://katex.org
 - @xterm/xterm, @xterm/addon-fit — MIT — https://github.com/xtermjs/xterm.js
+- CodeMirror 6 (@codemirror/*, @lezer/*) — MIT — https://codemirror.net
 - Tabler / self-hosted assets — see individual upstream licenses
 
 ## Models

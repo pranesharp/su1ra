@@ -6,7 +6,7 @@ import Composer from './components/Composer.jsx'
 import Logo from './components/Logo.jsx'
 import SettingsModal from './components/SettingsModal.jsx'
 import ModelHub from './components/ModelHub.jsx'
-import IdePane from './components/IdePane.jsx'
+import EditorPane from './components/EditorPane.jsx'
 import WindowControls from './components/TitleBar.jsx'
 import ArtifactPane from './components/ArtifactPane.jsx'
 import { copyText } from './clip'
@@ -26,14 +26,15 @@ const COMMANDS = [
   { cmd: '/build', desc: 'toggle build mode — switches to the build loadout model/ctx, unloads the casual model; /build <msg> arms one message' },
   { cmd: '/casual', desc: 'switch to casual mode — everyday chat model, unloads the build model, tools off' },
   { cmd: '/modes', desc: 'show current mode — casual/build plus model, ctx, think, tools' },
-  { cmd: '/ide', desc: 'toggle the python ide pane' },
+  { cmd: '/editor', desc: 'toggle the editor pane — save/run scratch files (py, js, sh, ps1, bat, rb, pl, lua)' },
   { cmd: '/mkdir', desc: 'new project folder in the workspace — /mkdir <name>' },
   { cmd: '/cd', desc: 'switch active project — /cd <name>, or bare /cd to show root + project' },
   { cmd: '/preview', desc: 'generate + open a preview for a project file — /preview <name.pptx|xlsx|docx|pdf|svg>' },
   { cmd: '/web', desc: 'open the browser pane — /web <url or search query> (search uses the selected engine)' },
 ]
 
-const STARTER_CODE = `# scratch — runs in ~/.local/share/su1ra/scratch
+const STARTER_CODE = `# scratch.py — lives in ~/Documents/.scratch
+# rename it (e.g. notes.md, run.js) — the extension picks the interpreter
 print("hello from su1ra")
 
 for i in range(3):
@@ -98,10 +99,11 @@ export default function App() {
   const [bgBrightness, setBgBrightness] = useState(() => readInjectedTheme().bgBrightness ?? DEFAULT_BRIGHTNESS)
   const [bgContrast, setBgContrast] = useState(() => readInjectedTheme().bgContrast ?? DEFAULT_CONTRAST)
   const [showStats, setShowStats] = useState(false)
-  const [ideOpen, setIdeOpen] = useState(false)
-  const [ideWidth, setIdeWidth] = useState(460)
-  const [ideCode, setIdeCode] = useState(STARTER_CODE)
-  const [ideOutput, setIdeOutput] = useState({ text: '', exitCode: null })
+  const [editorOpen, setEditorOpen] = useState(false)
+  const [editorWidth, setEditorWidth] = useState(460)
+  const [editorCode, setEditorCode] = useState(STARTER_CODE)
+  const [editorName, setEditorName] = useState('scratch.py')
+  const [editorOutput, setEditorOutput] = useState({ text: '', exitCode: null })
   const [artifact, setArtifact] = useState(null)
   const [artifactTab, setArtifactTab] = useState('preview')
   const [artifactPath, setArtifactPath] = useState(null)
@@ -111,6 +113,7 @@ export default function App() {
   const [browserEngine, setBrowserEngine] = useState('bing')
   const [workspace, setWorkspace] = useState({ root: '', project: '' })
   const [codeArmed, setCodeArmed] = useState(false)
+  const [casualSysp, setCasualSysp] = useState('')
   const [sandboxTools, setSandboxTools] = useState(true)
   const [loadout, setLoadout] = useState({ casualModel: '', codeModel: '', casualCtx: 0, codeCtx: 0, casualThink: 'off' })
   const [engine, setEngine] = useState('auto')
@@ -128,7 +131,7 @@ export default function App() {
   // would otherwise hijack following tokens into the wrong bubble and even
   // break think-tag parsing with glued text.
   const streamTargetRef = useRef(null)
-  const ideRunSeenRef = useRef(null)
+  const editorRunSeenRef = useRef(null)
   const [runSignal, setRunSignal] = useState(0)
   const idRef = useRef(1000)
   const bootedRef = useRef(false)
@@ -438,6 +441,7 @@ export default function App() {
       setSettingsView(settingsRes.settings_view === 'list' ? 'list' : 'split')
       setEngine(['auto', 'cpu', 'gpu'].includes(settingsRes.engine) ? settingsRes.engine : 'auto')
       setEngineVulkan(settingsRes.engine_vulkan === true)
+      setCasualSysp(settingsRes.default_system_prompt_casual || '')
       chatDefaultsRef.current = {
         system_prompt: settingsRes.default_system_prompt || '',
         temperature: typeof settingsRes.default_temperature === 'number' ? settingsRes.default_temperature : 0.7,
@@ -448,8 +452,8 @@ export default function App() {
         think: null,
       }
       setShowStats(settingsRes.show_stats === true)
-      setIdeOpen(settingsRes.ide_open === true)
-      setIdeWidth(typeof settingsRes.ide_width === 'number' ? settingsRes.ide_width : 460)
+      setEditorOpen(settingsRes.ide_open === true)
+      setEditorWidth(typeof settingsRes.ide_width === 'number' ? settingsRes.ide_width : 460)
       setSandboxTools(settingsRes.sandbox_tools !== false)
       setWorkspace({ root: settingsRes.workspace_root || '', project: settingsRes.active_project || '' })
       setModels(modelsRes.models)
@@ -468,8 +472,8 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    widthRef.current = ideWidth
-  }, [ideWidth])
+    widthRef.current = editorWidth
+  }, [editorWidth])
 
   useEffect(() => {
     return () => {
@@ -489,14 +493,34 @@ export default function App() {
     if (blocked) return
     const detail = await api.getConversation(id)
     if (!detail) return
+    // Mode follows the chat: opening an old build chat while armed for
+    // casual (or vice versa) flips the desk first, so tools/think/prompt
+    // resolution match what the chat was built with. Deliberately lighter
+    // than /build — this restores state, it doesn't rewrite the loadout
+    // settings or force the IDE open.
+    const wantBuild = !!detail.conversation.code_mode
+    if (wantBuild !== codeArmed) {
+      const targetModel = wantBuild ? (loadout.codeModel || selectedModel) : (loadout.casualModel || selectedModel)
+      unloadInBackground(selectedModel, targetModel)
+      setCodeArmed(wantBuild)
+      if (targetModel) setSelectedModel(targetModel)
+      chatDefaultsRef.current = {
+        ...chatDefaultsRef.current,
+        context_length: wantBuild ? Math.max(chatDefaultsRef.current.context_length || 0, loadout.codeCtx || 0) : (loadout.casualCtx || 0),
+      }
+      pushSystem(`// ${wantBuild ? 'build' : 'casual'} mode — switched to match chat [${id}]`)
+    }
     setActiveId(detail.conversation.id)
     setMessages(detail.messages)
-    setSelectedModel(detail.conversation.model || '')
+    setSelectedModel(detail.conversation.model || selectedModel)
   }
 
   async function newChat() {
     if (blocked) return
-    const conversation = await api.createConversation({ model: selectedModel, ...chatDefaultsRef.current })
+    // No system_prompt stamp — the backend resolves per-mode defaults at send
+    // time. The chat is tagged with the mode it was born in.
+    const { system_prompt: _omit, ...defaults } = chatDefaultsRef.current
+    const conversation = await api.createConversation({ model: selectedModel, ...defaults, code_mode: codeArmed })
     setConversations((prev) => [conversation, ...prev])
     setActiveId(conversation.id)
     setMessages([])
@@ -511,6 +535,35 @@ export default function App() {
       setActiveId(null)
       setMessages([])
     }
+  }
+
+  // Mode switch = a fresh chat on the new desk. The chat being left keeps
+  // its own mode and stays listed under its /chats column. An EMPTY chat
+  // (no messages yet — nothing has committed it to a mode) is retagged and
+  // reused instead, so toggling back and forth can't stack empty shells.
+  async function startModeChat(isBuild, model, ctx) {
+    if (activeConversation && messages.length === 0) {
+      const updated = await api.updateConversation(activeConversation.id, {
+        code_mode: isBuild,
+        ...(model ? { model } : {}),
+        context_length: ctx,
+      })
+      if (updated) setConversations((prev) => prev.map((c) => (c.id === updated.id ? updated : c)))
+      return activeConversation
+    }
+    // No system_prompt stamp — the backend resolves per-mode defaults at send
+    // time. The chat is tagged with the mode it was born in.
+    const { system_prompt: _omit, ...defaults } = chatDefaultsRef.current
+    const conversation = await api.createConversation({
+      model: model || selectedModel,
+      ...defaults,
+      context_length: ctx,
+      code_mode: isBuild,
+    })
+    setConversations((prev) => [conversation, ...prev])
+    setActiveId(conversation.id)
+    setMessages([])
+    return conversation
   }
 
   async function changeModel(name) {
@@ -549,38 +602,33 @@ export default function App() {
     })
   }
 
-  // Leaving code mode = entering casual: restore the casual loadout
-  // (model + ctx), disarm tools. Eviction runs in the background so the
-  // switch itself is instant (see above).
+  // Leaving code mode = entering casual: restore the casual loadout (picker +
+  // new-chat defaults — the chat being left is NOT touched; it keeps its mode
+  // and history) and open a fresh casual chat. Eviction runs in the background
+  // so the switch itself is instant (see unloadInBackground).
   async function leaveCodeMode(echo) {
-    const currentCtx = activeConversation?.context_length ?? chatDefaultsRef.current.context_length ?? 0
     const casualModel = loadout.casualModel || selectedModel
     const oldModel = activeConversation?.model || selectedModel
     unloadInBackground(oldModel, casualModel)
-    const newCtx = loadout.casualCtx || currentCtx
-    await applyModelCtx(casualModel, newCtx)
+    const newCtx = loadout.casualCtx || chatDefaultsRef.current.context_length || 0
+    if (casualModel) setSelectedModel(casualModel)
+    chatDefaultsRef.current = { ...chatDefaultsRef.current, context_length: newCtx }
     if (loadout.casualCtx) {
       await api.saveSettings({ default_context_length: newCtx, loadout_casual_ctx: newCtx })
     }
     setCodeArmed(false)
+    const conversation = await startModeChat(false, casualModel, newCtx)
     pushSystem(
-      `${echo}\n\n// casual mode — model ${casualModel || '(unchanged)'} · ctx ${newCtx} · think ${loadout.casualThink === 'on' ? 'on' : 'off'} · tools off`,
+      `${echo}\n\n// casual mode — new chat #${conversation.id} · model ${casualModel || '(unchanged)'} · ctx ${newCtx} · think ${loadout.casualThink === 'on' ? 'on' : 'off'} · tools off`,
     )
   }
 
-  // Apply a model + context switch (loadout changes): updates the picker,
-  // the active conversation (persisted per chat) and the new-chat defaults.
-  async function applyModelCtx(name, ctx) {
+  // Apply a model + context switch to the DESK (picker + new-chat defaults)
+  // without touching any conversation. Mode switches use startModeChat; the
+  // loadout pickers in settings go through saveSettings.
+  function applyModelCtx(name, ctx) {
     if (name) setSelectedModel(name)
     chatDefaultsRef.current = { ...chatDefaultsRef.current, context_length: ctx }
-    if (activeConversation) {
-      const patch = { context_length: ctx }
-      if (name) patch.model = name
-      const updated = await api.updateConversation(activeConversation.id, patch)
-      if (updated) {
-        setConversations((prev) => prev.map((c) => (c.id === updated.id ? updated : c)))
-      }
-    }
   }
 
   function sizeLabel(bytes) {
@@ -717,11 +765,32 @@ export default function App() {
 
     if (cmd === '/chats') {
       if (!arg) {
-        const lines = conversations.map(
-          (c, i) => `${String(i + 1).padStart(2)}. [${c.id}] ${(c.title || 'new chat').slice(0, 50)}${c.id === activeId ? '  *' : ''}`,
-        )
+        if (!conversations.length) {
+          pushSystem(`${echo}\n\n// no chats yet — /newchat or just start typing`)
+          return
+        }
+        // Two columns: BUILD on the left, CASUAL on the right. Ordinals are
+        // global (same list /chats <n|id> and /delchat resolve against).
+        const W = 34
+        const cell = (s) => {
+          const t = s.length > W ? s.slice(0, W - 1) + '…' : s
+          return t.padEnd(W)
+        }
+        const label = (c) => {
+          const n = conversations.indexOf(c) + 1
+          return `${String(n).padStart(2)}. [${c.id}] ${(c.title || 'new chat').slice(0, 22)}${c.id === activeId ? ' *' : ''}`
+        }
+        const build = conversations.filter((c) => c.code_mode)
+        const casual = conversations.filter((c) => !c.code_mode)
+        const lines = [cell('// BUILD') + '// CASUAL']
+        const rows = Math.min(Math.max(build.length, casual.length), 20)
+        for (let i = 0; i < rows; i++) {
+          lines.push(cell(build[i] ? label(build[i]) : '') + (casual[i] ? label(casual[i]) : ''))
+        }
+        const overflow = Math.max(build.length, casual.length) - 20
+        if (overflow > 0) lines.push(`// …and ${overflow} more`)
         pushSystem(
-          `${echo}\n\n${lines.join('\n') || '// no conversations yet'}\n\n// open with: /chats <n or [id]>   // delete with: /delchat <n or [id]>`,
+          `${echo}\n\n${lines.join('\n')}\n\n// open: /chats <n or [id]>   // delete: /delchat <n or [id]>\n// opening a build chat switches to build mode (and back)`,
         )
         return
       }
@@ -850,11 +919,13 @@ export default function App() {
       return
     }
 
-    if (cmd === '/ide') {
-      const next = !ideOpen
-      setIdeOpen(next)
+    if (cmd === '/editor' || cmd === '/ide') { // /ide kept as a hidden alias
+      const next = !editorOpen
+      setEditorOpen(next)
       await api.saveSettings({ ide_open: next })
-      const line = next ? '// ide pane: on' : '// ide pane: off'
+      const line = next
+        ? '// editor: on — save/run scratch files; the extension picks the interpreter (py, js, sh, ps1, bat, rb, pl, lua)'
+        : '// editor: off'
       pushSystem(`${echo}\n\n${line}`)
       return
     }
@@ -916,26 +987,28 @@ export default function App() {
         await send(rest, { forceArmed: true })
       } else {
         const next = !codeArmed
-        const currentCtx = activeConversation?.context_length ?? chatDefaultsRef.current.context_length ?? 0
         if (next) {
-          // entering code mode: code loadout model + code ctx (at least 50000) + ide open.
+          // Entering build mode: code loadout model + code ctx (at least
+          // 50000) + ide open + a FRESH BUILD CHAT. The chat being left is
+          // untouched (keeps its mode + history; an empty chat is reused).
           // State flips FIRST so the switch is instant; the slow model
           // eviction runs in the background (see unloadInBackground).
           const codeModel = loadout.codeModel || selectedModel
           const oldModel = activeConversation?.model || selectedModel
-          const newCtx = Math.max(currentCtx, loadout.codeCtx || 50000)
+          const newCtx = Math.max(chatDefaultsRef.current.context_length || 0, loadout.codeCtx || 50000)
           setCodeArmed(true)
-          pushSystem(
-            `${echo}\n\n// build mode: on — model ${codeModel || '(none selected)'} · ctx ${newCtx} · think on · ide open (persists until /build or /casual, off on restart)`,
-          )
           unloadInBackground(oldModel, codeModel)
-          await applyModelCtx(codeModel, newCtx)
+          applyModelCtx(codeModel, newCtx)
           await api.saveSettings({ default_context_length: newCtx, loadout_code_ctx: newCtx })
           setLoadout((l) => ({ ...l, codeCtx: newCtx }))
-          if (!ideOpen) {
-            setIdeOpen(true)
+          if (!editorOpen) {
+            setEditorOpen(true)
             await api.saveSettings({ ide_open: true })
           }
+          const conversation = await startModeChat(true, codeModel, newCtx)
+          pushSystem(
+            `${echo}\n\n// build mode: on — new chat #${conversation.id} · model ${codeModel || '(none selected)'} · ctx ${newCtx} · think on · ide open (persists until /build or /casual, off on restart)`,
+          )
         } else {
           await leaveCodeMode(echo)
         }
@@ -958,8 +1031,16 @@ export default function App() {
       const effCtx = activeConversation?.context_length ?? chatDefaultsRef.current.context_length ?? 0
       const effThink =
         activeConversation?.think ?? (codeArmed ? 'on' : loadout.casualThink === 'on' ? 'on' : 'off')
+      // sysprompt state reflects the real resolution: per-chat override, else
+      // the mode's default (build = sysp.txt, casual = its own default).
+      const effSysp =
+        (activeConversation?.system_prompt || '').trim() ||
+        (codeArmed ? chatDefaultsRef.current.system_prompt || '' : casualSysp)
+      const syspLabel = effSysp
+        ? `on (${(activeConversation?.system_prompt || '').trim() ? 'per-chat' : mode === 'build' ? 'sysp.txt' : 'casual default'})`
+        : 'off'
       pushSystem(
-        `${echo}\n\n// mode: ${mode}\n// model: ${effModel} (casual loadout: ${loadout.casualModel || '—'} · build loadout: ${loadout.codeModel || '—'})\n// ctx: ${effCtx} · think: ${effThink || 'auto'} · tools: ${codeArmed ? 'armed' : 'off'} · sysprompt: ${codeArmed ? 'on (build mode)' : 'off (casual)'} · engine: ${engine}${engine === 'gpu' && engineVulkan ? '+vulkan' : ''}\n// workspace: ${workspace.root || '(unset)'}${workspace.project ? ` · project: ${workspace.project}` : ''}`,
+        `${echo}\n\n// mode: ${mode}\n// model: ${effModel} (casual loadout: ${loadout.casualModel || '—'} · build loadout: ${loadout.codeModel || '—'})\n// ctx: ${effCtx} · think: ${effThink || 'auto'} · tools: ${codeArmed ? 'armed' : 'off'} · sysprompt: ${syspLabel} · engine: ${engine}${engine === 'gpu' && engineVulkan ? '+vulkan' : ''}\n// workspace: ${workspace.root || '(unset)'}${workspace.project ? ` · project: ${workspace.project}` : ''}`,
       )
       return
     }
@@ -967,14 +1048,15 @@ export default function App() {
     pushSystem(`${echo}\n\n// unknown command: ${cmd} — try /help`)
   }
 
-  function attachIdeRun(text) {
+  function attachEditorRun(text) {
     const finished =
-      ideOutput.exitCode !== null && ideOutput.text && ideOutput.text.trim() && ideOutput !== ideRunSeenRef.current
+      editorOutput.exitCode !== null && editorOutput.text && editorOutput.text.trim() && editorOutput !== editorRunSeenRef.current
     if (!finished) return text
-    ideRunSeenRef.current = ideOutput
-    const out = ideOutput.text
-    const status = ideOutput.exitCode < 0 ? 'killed' : `exit ${ideOutput.exitCode}`
-    const parts = [text, '', `// attached: ide run (${status})`, '', '```python', ideCode, '```']
+    editorRunSeenRef.current = editorOutput
+    const out = editorOutput.text
+    const status = editorOutput.exitCode < 0 ? 'killed' : `exit ${editorOutput.exitCode}`
+    const lang = (editorName.split('.').pop() || 'txt').toLowerCase()
+    const parts = [text, '', `// attached: editor run — ${editorName} (${status})`, '', '```' + lang, editorCode, '```']
     if (out.trim()) parts.push('', 'output:', '', '```', out, '```')
     return parts.join('\n')
   }
@@ -996,7 +1078,8 @@ export default function App() {
     // create one lazily (same defaults the send path uses).
     let convId = activeId
     if (!activeConversation) {
-      const conversation = await api.createConversation({ model: selectedModel, ...chatDefaultsRef.current })
+      const { system_prompt: _omit, ...defaults } = chatDefaultsRef.current
+      const conversation = await api.createConversation({ model: selectedModel, ...defaults, code_mode: codeArmed })
       convId = conversation.id
       setConversations((prev) => [conversation, ...prev])
       setActiveId(convId)
@@ -1038,7 +1121,7 @@ export default function App() {
       await handleCommand(trimmed)
       return
     }
-    const outgoing = attachIdeRun(trimmed)
+    const outgoing = attachEditorRun(trimmed)
     // Tools are strictly code-mode. The old ```python auto-arm is gone:
     // casual promises "tools off" and means it.
     const arm = opts.forceArmed === true || codeArmed
@@ -1049,7 +1132,11 @@ export default function App() {
     const think = activeConversation?.think ?? (codeMode ? 'on' : (loadout.casualThink === 'on' ? 'on' : 'off'))
     let convId = activeId
     if (!activeConversation) {
-      const conversation = await api.createConversation({ model: selectedModel, ...chatDefaultsRef.current })
+      // Never stamp a system prompt into the new chat — the backend resolves
+      // per-mode defaults at send time (build = sysp.txt, casual = its own
+      // default). Tag the chat with the mode it was born in.
+      const { system_prompt: _omit, ...defaults } = chatDefaultsRef.current
+      const conversation = await api.createConversation({ model: selectedModel, ...defaults, code_mode: codeMode })
       convId = conversation.id
       setConversations((prev) => [conversation, ...prev])
       setActiveId(convId)
@@ -1199,14 +1286,14 @@ export default function App() {
     await send(newContent ?? msg.content)
   }
 
-  async function closeIde() {
-    setIdeOpen(false)
+  async function closeEditor() {
+    setEditorOpen(false)
     await api.saveSettings({ ide_open: false })
   }
 
   function openBrowser(url) {
-    if (!ideOpen) {
-      setIdeOpen(true)
+    if (!editorOpen) {
+      setEditorOpen(true)
       api.saveSettings({ ide_open: true })
     }
     setBrowserUrl(url)
@@ -1228,7 +1315,7 @@ export default function App() {
     window.__su1raOpenInPane = (url) => {
       if (!url) return
       url = unwrapRedirect(url)
-      setIdeOpen(true)
+      setEditorOpen(true)
       setBrowserHistory((prev) => [...prev.slice(0, browserIndex + 1), url])
       setBrowserIndex(browserIndex + 1)
       setBrowserUrl(url)
@@ -1252,7 +1339,7 @@ export default function App() {
 
   function browserClose() {
     setBrowserUrl(null)
-    if (artifact === null) setIdeOpen(false)
+    if (artifact === null) setEditorOpen(false)
   }
 
   // Browser pane -> chat: inject the fetched page text as a user message so
@@ -1282,8 +1369,8 @@ export default function App() {
     setArtifact(code)
     setArtifactPath(path)
     setArtifactTab('preview')
-    if (!ideOpen) {
-      setIdeOpen(true)
+    if (!editorOpen) {
+      setEditorOpen(true)
       api.saveSettings({ ide_open: true })
     }
   }
@@ -1295,8 +1382,8 @@ export default function App() {
       setArtifact(res.content)
       setArtifactPath(res.path)
       // note: tab untouched on refresh — your preview/code tab survives edits
-      if (!ideOpen) {
-        setIdeOpen(true)
+      if (!editorOpen) {
+        setEditorOpen(true)
         api.saveSettings({ ide_open: true })
       }
       pushSystem(`// preview: ${res.path}`)
@@ -1317,9 +1404,9 @@ export default function App() {
   function loadToIde(code) {
     setArtifact(null)
     setArtifactPath(null)
-    setIdeCode(code)
-    if (!ideOpen) {
-      setIdeOpen(true)
+    setEditorCode(code)
+    if (!editorOpen) {
+      setEditorOpen(true)
       api.saveSettings({ ide_open: true })
     }
     pushSystem(`// loaded ${code.split('\n').length} lines into the ide`)
@@ -1328,24 +1415,25 @@ export default function App() {
   function runInIde(code) {
     setArtifact(null)
     setArtifactPath(null)
-    setIdeCode(code)
-    if (!ideOpen) {
-      setIdeOpen(true)
+    setEditorCode(code)
+    if (!editorOpen) {
+      setEditorOpen(true)
       api.saveSettings({ ide_open: true })
     }
     setRunSignal((s) => s + 1)
   }
 
-  function sendIdeToChat() {
-    ideRunSeenRef.current = ideOutput
-    const { text, exitCode } = ideOutput
+  function sendEditorToChat() {
+    editorRunSeenRef.current = editorOutput
+    const { text, exitCode } = editorOutput
     const out = text
     const status = exitCode === null ? 'not run' : exitCode < 0 ? 'killed' : `exit ${exitCode}`
+    const lang = (editorName.split('.').pop() || 'txt').toLowerCase()
     const parts = [
-      'Here is the code currently in my IDE editor:',
+      'Here is the code currently in my editor:',
       '',
-      '```python',
-      ideCode,
+      '```' + lang,
+      editorCode,
       '```',
     ]
     if (out.trim()) {
@@ -1379,7 +1467,7 @@ export default function App() {
       const maxW = Math.max(280, Math.min(1200, window.innerWidth - 360))
       const next = Math.min(maxW, Math.max(280, window.innerWidth - ev.clientX))
       widthRef.current = next
-      setIdeWidth(next)
+      setEditorWidth(next)
     }
     const onUp = () => {
       if (ended) return
@@ -1403,7 +1491,7 @@ export default function App() {
     window.addEventListener('mouseup', onUp)
   }
 
-  async function saveSettings({ ollamaUrl, systemPrompt, temperature, contextLength, accent: newAccent, sandboxTools: sandboxPref, loadoutCasualModel, loadoutCodeModel, loadoutCasualCtx, loadoutCodeCtx, loadoutCasualThink, bgBrightness: newBrightness, bgContrast: newContrast, engine: newEngine, engineVulkan: vulkanPref, workspaceRoot, activeProject }) {
+  async function saveSettings({ ollamaUrl, systemPrompt, systemPromptScope, temperature, contextLength, accent: newAccent, sandboxTools: sandboxPref, loadoutCasualModel, loadoutCodeModel, loadoutCasualCtx, loadoutCodeCtx, loadoutCasualThink, bgBrightness: newBrightness, bgContrast: newContrast, engine: newEngine, engineVulkan: vulkanPref, workspaceRoot, activeProject }) {
     // Autosaved on every change (no Save button) — stay open, skip invalid
     // mid-typing values instead of failing the whole patch.
     const url = (ollamaUrl || '').trim()
@@ -1411,11 +1499,19 @@ export default function App() {
     const tempOk = temperature === undefined || Number.isFinite(temperature)
     // New chats follow the casual loadout ctx (falls back to the per-chat value).
     const newDefaultCtx = loadoutCasualCtx || contextLength
+    // System prompt edits land in ONE place (scope): 'default' = the mode's
+    // global default (build -> default_system_prompt/sysp.txt, casual ->
+    // default_system_prompt_casual); 'chat' = the open chat's per-chat
+    // override. Editing a default must never re-stamp the open chat, and a
+    // per-chat edit must never touch the defaults.
+    const spDefined = systemPrompt !== undefined
+    const spToDefault = spDefined && systemPromptScope !== 'chat'
+    const spToChat = spDefined && systemPromptScope === 'chat'
     await api.saveSettings({
       ...(urlOk ? { ollama_url: url } : {}),
       accent: newAccent,
       ...(sandboxPref === undefined ? {} : { sandbox_tools: sandboxPref }),
-      default_system_prompt: systemPrompt,
+      ...(spToDefault ? { [codeArmed ? 'default_system_prompt' : 'default_system_prompt_casual']: systemPrompt } : {}),
       ...(tempOk ? { default_temperature: temperature } : {}),
       default_context_length: newDefaultCtx,
       ...(loadoutCasualThink === undefined ? {} : { loadout_casual_think: loadoutCasualThink }),
@@ -1446,18 +1542,19 @@ export default function App() {
       }))
     }
     chatDefaultsRef.current = {
-      system_prompt: systemPrompt,
+      system_prompt: spToDefault && codeArmed ? systemPrompt : chatDefaultsRef.current.system_prompt,
       temperature,
       context_length: newDefaultCtx,
       think: loadoutCasualThink !== undefined ? (loadoutCasualThink === 'on' ? 'on' : 'off') : chatDefaultsRef.current.think,
     }
+    if (spToDefault && !codeArmed) setCasualSysp(systemPrompt)
     setStatus(await api.getStatus())
     setAccent(newAccent)
     if (newBrightness !== undefined) setBgBrightness(newBrightness)
     if (newContrast !== undefined) setBgContrast(newContrast)
     if (activeConversation) {
       const updated = await api.updateConversation(activeConversation.id, {
-        system_prompt: systemPrompt,
+        ...(spToChat ? { system_prompt: systemPrompt } : {}),
         ...(tempOk ? { temperature } : {}),
         context_length: contextLength,
       })
@@ -1498,7 +1595,7 @@ export default function App() {
           <div className="brand-line">
             <Logo size={20} />
             <span className="brand">Su1ra</span>
-            <span className="brand-ver">v0.3.1</span>
+            <span className="brand-ver">v0.3.2</span>
             <span className={`status-tag${status?.ok ? ' ok' : ''}`}>
               [{status?.ok ? 'ok' : 'offline'}]
             </span>
@@ -1514,17 +1611,17 @@ export default function App() {
         <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} onLoadToIde={loadToIde} onRunCode={runInIde} onDownloadArtifact={downloadArtifact} onOpenArtifact={openArtifact} onOllamaReady={refreshStatus} onResendFrom={resendFrom} />
         <Composer commands={COMMANDS} disabled={!currentModel} streaming={streaming} onSend={send} onStop={stop} codeArmed={codeArmed} vision={visionModel} attachments={pendingAttachments} onAddFiles={addFiles} onRemoveAttachment={removeAttachment} />
       </main>
-      {ideOpen && (
+      {editorOpen && (
         <>
           <div className="ide-resize" onPointerDown={startResize} />
           {artifact !== null || browserUrl !== null ? (
             <ArtifactPane
-              width={ideWidth}
+              width={editorWidth}
               code={artifact}
               path={artifactPath}
               tab={artifactTab}
               onTab={setArtifactTab}
-              onClose={closeIde}
+              onClose={closeEditor}
               onDownload={() => downloadArtifact(artifact)}
               browserUrl={browserUrl}
               browserHistory={browserHistory}
@@ -1539,14 +1636,23 @@ export default function App() {
               onSummarize={summarizePage}
             />
           ) : (
-            <IdePane
-              width={ideWidth}
-              code={ideCode}
-              onCodeChange={setIdeCode}
-              onClose={closeIde}
+            <EditorPane
+              width={editorWidth}
+              code={editorCode}
+              filename={editorName}
+              onCodeChange={setEditorCode}
+              onFilenameChange={setEditorName}
+              onClose={closeEditor}
               onResizeStart={startResize}
-              onOutputChange={setIdeOutput}
-              onSendToChat={sendIdeToChat}
+              onOutputChange={setEditorOutput}
+              onSendToChat={sendEditorToChat}
+              onPreview={(content, name) => {
+                // editor "run" for html/svg: render the buffer in the preview pane
+                setArtifact(content)
+                setArtifactPath(null)
+                setArtifactTab('preview')
+                pushSystem(`// preview: ${name} (from editor)`)
+              }}
               runSignal={runSignal}
             />
           )}
@@ -1570,6 +1676,8 @@ export default function App() {
             sandboxTools={sandboxTools}
             workspace={workspace}
             defaultSystemPrompt={chatDefaultsRef.current.system_prompt || ''}
+            defaultSystemPromptCasual={casualSysp}
+            mode={codeArmed ? 'build' : 'casual'}
             onSave={saveSettings}
             onClose={() => setSettingsOpen(false)}
             onOpenModels={() => { setSettingsOpen(false); setModelHubOpen(true) }}

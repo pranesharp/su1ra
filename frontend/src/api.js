@@ -238,6 +238,60 @@ export async function streamRun(body, handlers, signal) {
   handlers.onExit(null)
 }
 
+export async function saveEditorFile(body) {
+  const res = await fetch('/api/editor/file', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    let detail = res.statusText
+    try {
+      const errBody = await res.json()
+      if (typeof errBody.detail === 'string') detail = errBody.detail
+    } catch {}
+    throw new Error(detail)
+  }
+  return res.json()
+}
+
+export async function editorOpen(rel) {
+  const res = await fetch(`/api/editor/open?path=${encodeURIComponent(rel)}`)
+  if (!res.ok) {
+    let detail = res.statusText
+    try {
+      const errBody = await res.json()
+      if (typeof errBody.detail === 'string') detail = errBody.detail
+    } catch {}
+    throw new Error(detail)
+  }
+  return res.json()
+}
+
+export async function editorTree() {
+  const res = await fetch('/api/editor/tree')
+  if (!res.ok) throw new Error(res.statusText)
+  return res.json()
+}
+
+// also used to create an empty file (code: '') or a folder via mkdir semantics
+export async function editorMkdirFile(body) {
+  const res = await fetch('/api/editor/mkdir', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    let detail = res.statusText
+    try {
+      const errBody = await res.json()
+      if (typeof errBody.detail === 'string') detail = errBody.detail
+    } catch {}
+    throw new Error(detail)
+  }
+  return res.json()
+}
+
 export async function sendRunInput(runId, text) {
   const res = await fetch('/api/run/input', {
     method: 'POST',

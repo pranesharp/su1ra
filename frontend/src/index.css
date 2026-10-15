@@ -706,6 +706,113 @@ button {
   text-align: center;
 }
 
+/* --- system monitor (btop-lite, bottom-left) ------------------------------ */
+.composer-foot {
+  position: relative;
+}
+
+.sysmon {
+  position: fixed;
+  left: 24px;
+  bottom: 14px;
+  display: flex;
+  align-items: flex-end; /* both columns sit on the baseline; extra GPUs grow upward */
+  gap: 14px;
+  z-index: 5;
+}
+
+.sysmon-col {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sysmon-cell {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.sysmon-glyph {
+  font-size: 10px;
+  line-height: 1;
+  color: var(--muted);
+  min-width: 13px; /* room for the gpu index subscript (G₀ G₁ …) */
+  white-space: nowrap;
+}
+
+.sysmon-glyph sub {
+  font-size: 7px;
+  line-height: 0;
+  vertical-align: -1px;
+  margin-left: 1px;
+}
+
+/* segmented meter: [ ▮▮▮▮▯▯▯▯▯▯ ] — fixed-size blocks, so no %-width
+   resolution against a shrink-to-fit parent (that left every fill at 0px) */
+.sysmon-track {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.sysmon-track::before {
+  content: '[';
+  margin-right: 2px;
+}
+
+.sysmon-track::after {
+  content: ']';
+  margin-left: 2px;
+}
+
+.sysmon-seg {
+  display: inline-block;
+  width: 4px;
+  height: 7px;
+  background: var(--sm-c);
+  opacity: 0.13;
+  transition: opacity 0.4s ease, box-shadow 0.4s ease;
+}
+
+.sysmon-seg.on {
+  opacity: 1;
+  box-shadow: 0 0 4px -1px var(--sm-c);
+}
+
+/* unavailable (no data source): dashed ghost track, glyph dimmed */
+.sysmon-cell.na .sysmon-glyph {
+  opacity: 0.35;
+}
+
+.sysmon-cell.na .sysmon-seg {
+  background: transparent;
+  opacity: 0.6;
+  height: 0;
+  border-bottom: 1px solid var(--faint);
+}
+
+/* backend not answering /api/sysmon — whole cluster dimmed uniformly */
+.sysmon.off .sysmon-cell {
+  opacity: 0.3;
+}
+
+:root {
+  --sm-green: #3fbf7f;
+  --sm-amber: #d9a441;
+  --sm-blue: #5b8dee;
+}
+
+/* narrow windows: the centered composer needs the room — hide the cluster */
+@media (max-width: 1180px) {
+  .sysmon {
+    display: none;
+  }
+}
+
 /* ---------- Image attachments ---------- */
 
 .composer.dragging {
@@ -1153,7 +1260,8 @@ button {
   flex-direction: column;
   min-width: 0;
   background: var(--panel);
-  border-left: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  border-right: none;
   height: 100vh;
   overflow: hidden;
 }
@@ -1177,62 +1285,175 @@ button {
   font-size: 12px;
 }
 
-.ide-editor {
+/* editor filename field: the buffer's file identity (extension = interpreter) */
+.ide-filename {
+  width: 140px;
+  margin-left: 8px;
+  padding: 2px 6px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text);
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.ide-filename:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* the code area: its own panel, CM fills it, slight inner breathing room */
+.code-panel {
+  flex: 1 1 auto;
+  margin: 8px 8px 8px 6px;
+}
+
+.code-panel .cm-host {
+  padding-top: 6px;
+}
+
+.code-panel .cm-editor {
+  background: transparent;
+}
+
+.ide-gutter {
+  display: none; /* line numbers now come from CodeMirror */
+}
+
+/* CodeMirror host: fills the editor area, mono font, no outer chrome */
+.cm-host {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.cm-host .cm-editor {
+  height: 100%;
+  font-family: var(--mono);
+}
+
+.cm-host .cm-scroller {
+  overflow: auto;
+  font-family: var(--mono);
+  line-height: 1.6;
+}
+
+/* --- editor body: explorer strip + code side by side ---------------------- */
+.ide-body {
   flex: 1 1 55%;
   display: flex;
   min-height: 0;
   overflow: hidden;
-  background: var(--code-bg);
-  border-bottom: 1px solid var(--border);
+  padding: 0;
 }
 
-.ide-gutter {
+/* --- explorer (scratch tree) ---------------------------------------------- */
+.explorer-panel {
   flex-shrink: 0;
-  overflow: hidden;
-  padding: 10px 8px 10px 12px;
-  text-align: right;
-  color: var(--faint);
-  font-size: 12.5px;
-  line-height: 1.6;
+  width: 192px;
+  margin: 8px 0 8px 8px;
   user-select: none;
-  background: var(--panel);
 }
 
-.ide-code {
-  flex: 1;
-  min-width: 0;
+/* explorer rows sit below the punched title */
+.explorer-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 8px 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.explorer-btn {
   background: none;
   border: none;
-  outline: none;
-  resize: none;
-  color: var(--text);
+  color: var(--faint);
   font-family: var(--mono);
-  font-size: 12.5px;
-  line-height: 1.6;
-  padding: 10px 12px;
-  white-space: pre;
+  font-size: 10.5px;
+  cursor: pointer;
+  padding: 1px 2px;
+}
+
+.explorer-btn:hover {
+  color: var(--accent);
+}
+
+.explorer-tree {
+  flex: 1;
   overflow: auto;
-  caret-color: var(--accent);
-  tab-size: 2;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.explorer-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  cursor: pointer;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.explorer-row:hover {
+  color: var(--text);
+  background: var(--bg);
+}
+
+.explorer-row.file.active {
+  color: var(--accent);
+}
+
+.explorer-row.dir {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.explorer-twist {
+  width: 10px;
+  flex-shrink: 0;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.explorer-children {
+  padding-left: 14px;
+}
+
+.explorer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* unsaved marker next to the filename field */
+.ide-dirty {
+  color: var(--accent);
+  font-size: 10.5px;
+  margin-left: 6px;
+  white-space: nowrap;
 }
 
 .ide-out {
-  flex: 1 1 45%;
+  flex: 1 1 auto;
   overflow: auto;
   margin: 0;
-  padding: 10px 12px;
+  padding: 6px 12px;
   font-family: var(--mono);
   font-size: 12px;
   line-height: 1.6;
   color: var(--muted);
-  background: var(--bg);
+  background: transparent;
   min-height: 0;
 }
 
 .ide-term {
-  flex: 1 1 45%;
+  flex: 1 1 auto;
   min-height: 0;
-  padding: 6px 12px;
+  padding: 2px 12px;
   overflow: hidden;
 }
 
@@ -1259,11 +1480,140 @@ button {
 
 .ide-status {
   flex-shrink: 0;
-  padding: 6px 12px;
-  border-top: 1px solid var(--border);
+  /* no border-top — the boxed output section above already closes itself
+     with its bottom border + corner glyphs */
+  padding: 5px 12px;
   font-size: 11px;
-  color: var(--faint);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--h-a) 8%, var(--panel));
+}
+
+/* the fixed-height bottom box in the pane's column flex */
+.ide-bottom {
+  flex-shrink: 0;
+}
+
+/* --- btop-style panels ------------------------------------------------------ */
+/* Each section is its own bordered box with a punched title + corner glyphs.
+   --ph (panel hue) comes from the accent-derived family: h-a = accent,
+   h-b/h-c/h-d = rotations set by applyAccent(). Borders/titles/corners all
+   take --ph, so everything follows the user's theme. */
+.panel {
+  --ph: var(--h-a);
+  --ph-line: color-mix(in srgb, var(--ph) 38%, var(--border));
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  background: transparent;
+  border: 1px solid var(--ph-line);
+}
+
+.panel.h-a {
+  --ph: var(--h-a);
+}
+
+.panel.h-b {
+  --ph: var(--h-b);
+}
+
+.panel.h-c {
+  --ph: var(--h-c);
+}
+
+.panel.h-d {
+  --ph: var(--h-d);
+}
+
+.panel-title {
+  position: absolute;
+  top: -7px;
+  left: 10px;
+  z-index: 3;
   background: var(--panel);
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 1.5px;
+  color: var(--ph);
+  user-select: none;
+}
+
+/* corner glyphs sit ON the border line; panel bg masks the line beneath */
+.btop-corner {
+  position: absolute;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--ph);
+  background: var(--panel);
+  padding: 0 1px;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.btop-corner.c-tl {
+  top: -6px;
+  left: -5px;
+}
+
+.btop-corner.c-tr {
+  top: -6px;
+  right: -5px;
+}
+
+.btop-corner.c-bl {
+  bottom: -6px;
+  left: -5px;
+}
+
+.btop-corner.c-br {
+  bottom: -6px;
+  right: -5px;
+}
+
+/* splitter row: the drag handle, visually part of the top border */
+.ide-split {
+  flex-shrink: 0;
+  height: 13px;
+  display: flex;
+  align-items: center;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.ide-split:hover .split-label,
+.ide-split:hover .split-grip {
+  color: color-mix(in srgb, var(--ph) 60%, var(--text));
+}
+
+.split-label {
+  position: absolute;
+  top: -6px;
+  left: 10px;
+  background: var(--panel);
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--ph);
+  letter-spacing: 1px;
+  user-select: none;
+  z-index: 4;
+}
+
+.split-grip {
+  margin: 0 auto;
+  color: var(--faint);
+  font-size: 10px;
+  letter-spacing: 4px;
+  user-select: none;
+}
+
+.ide-bottom-inner {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 /* ---------- Browser pane ---------- */
@@ -1967,4 +2317,11 @@ body.pane-resizing {
 body.pane-resizing iframe,
 body.pane-resizing .ide-pane {
   pointer-events: none;
+}
+
+/* the editor's bottom splitter lives INSIDE .ide-pane — keep it live during
+   its own drag (child auto overrides the parent's none) */
+body.pane-resizing .ide-split {
+  pointer-events: auto;
+  cursor: row-resize;
 }

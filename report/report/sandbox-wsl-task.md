@@ -3,6 +3,12 @@
 Status: QUEUED (not started — nothing exists in the repo for this yet; verified
 2026-10-13 from this Linux clone: `backend/sandbox.py` is Linux-bwrap only, no WSL
 code in any commit local or remote, fplan checkbox unchecked).
+Update 2026-10-15 (Windows boot probe): WSL2 + Arch distro ARE present; python3
+and bwrap are NOT installed in the distro (`sudo pacman -S python bwrap` prepares
+the box). Plan of record expanded in fplan.md "v2 ideas" — option sweep done
+(AppContainer reads user files, Windows Sandbox is Pro-only + API-less, Docker =
+WSL underneath → WSL2 + bwrap chosen). wsl.exe gotcha learned live: stdout is
+UTF-16, strip nulls when parsing.
 
 ## Why
 

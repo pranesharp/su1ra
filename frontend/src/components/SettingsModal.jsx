@@ -107,13 +107,16 @@ function ModelSelect({ label, value, onChange, models }) {
   )
 }
 
-export default function SettingsModal({ status, conversation, accent, sandboxTools, model, models, loadout, view, onViewChange, bgBrightness, bgContrast, engine, engineVulkan, workspace, defaultSystemPrompt, onSave, onClose, onOpenModels, onServerChanged }) {
+export default function SettingsModal({ status, conversation, accent, sandboxTools, model, models, loadout, view, onViewChange, bgBrightness, bgContrast, engine, engineVulkan, workspace, defaultSystemPrompt, defaultSystemPromptCasual, mode, onSave, onClose, onOpenModels, onServerChanged }) {
   const [ollamaUrl, setOllamaUrl] = useState(status?.url || 'http://localhost:11434')
-  // Show the EFFECTIVE prompt: per-chat when set, else the global default.
-  // Previously an empty box here made users think no prompt was applied
-  // (while the backend was sending the default all along).
-  const showingDefault = !(conversation?.system_prompt || '').trim()
-  const [systemPrompt, setSystemPrompt] = useState(conversation?.system_prompt || defaultSystemPrompt || '')
+  // Show the EFFECTIVE prompt: per-chat override when set, else the mode's
+  // default (build = sysp.txt; casual = its own default, empty out of the
+  // box). Each mode's default is stored and edited separately — the bundled
+  // build prompt never shows up in the casual box.
+  const perChatPrompt = (conversation?.system_prompt || '').trim()
+  const modeDefaultPrompt = mode === 'build' ? (defaultSystemPrompt || '') : (defaultSystemPromptCasual || '')
+  const showingDefault = !perChatPrompt
+  const [systemPrompt, setSystemPrompt] = useState(perChatPrompt || modeDefaultPrompt || '')
   const [temperature, setTemperature] = useState(conversation?.temperature ?? 0.7)
   const [ctxText, setCtxText] = useState(conversation?.context_length ? String(conversation.context_length) : '')
   const [selectedAccent, setSelectedAccent] = useState(accent || DEFAULT_ACCENT)
@@ -212,6 +215,9 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
     return {
       ollamaUrl: ollamaUrl.trim(),
       systemPrompt,
+      // where this edit lands: the mode's default, or the open chat's
+      // per-chat override (never both)
+      systemPromptScope: showingDefault ? 'default' : 'chat',
       temperature,
       contextLength: parseCtxText(ctxText),
       accent: selectedAccent,
@@ -304,6 +310,13 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
   }
 
   async function resetDefault() {
+    // Reset restores the MODE's default: build -> the bundled sysp.txt;
+    // casual -> empty (casual ships without a prompt by design).
+    if (mode === 'casual') {
+      setSystemPrompt('')
+      setExtMsg('// casual default cleared — casual chats will run with no system prompt')
+      return
+    }
     try {
       const b = await getBundledPrompt()
       if (b.content) {
@@ -445,15 +458,21 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
           </>
         )}
         <label>
-          <span>System prompt (build mode only — ignored in casual chat)</span>
+          <span>System prompt ({mode} mode{showingDefault ? ' default' : ' — this chat only'})</span>
           <textarea
             rows={4}
             value={systemPrompt}
             onChange={(e) => setSystemPrompt(e.target.value)}
-            placeholder="You are a helpful assistant."
+            placeholder={mode === 'casual' ? 'Empty = no system prompt in casual chats.' : 'You are a helpful assistant.'}
           />
-          {showingDefault && (
-            <p className="prompt-note">// showing global default ({(defaultSystemPrompt || '').length} chars) — it is sent in build mode; saving writes to this chat + default</p>
+          {showingDefault && mode === 'build' && (
+            <p className="prompt-note">// build default (sysp.txt, {(modeDefaultPrompt || '').length} chars) — sent in every build chat without its own override</p>
+          )}
+          {showingDefault && mode === 'casual' && (
+            <p className="prompt-note">// casual default ({(modeDefaultPrompt || '').length} chars) — sent in every casual chat; empty = none. The build prompt (sysp.txt) is separate and only applies in build mode.</p>
+          )}
+          {!showingDefault && (
+            <p className="prompt-note">// per-chat override — saving writes THIS chat only; other chats keep their mode default</p>
           )}
           <div className="prompt-actions">
             <button className="btn-ghost" onClick={openExternal}>[ edit in external editor ]</button>

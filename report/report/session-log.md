@@ -1140,3 +1140,297 @@ via run_python, PDFs/xlsx dropped into the project by hand.
   (no src/href remote refs — xmlns identifiers not counted).
 - Endpoint live via ASGI: 200 + file written; ../ escape and missing → 422/404.
 - parse + import clean; yarn build clean. Restart needed.
+
+---
+
+# Su1ra work session — 2026-10-15 (fix: ws_ls/ws_read/ws_write/ws_edit silently killed the stream)
+
+## Symptom
+Build mode, capable model: it calls ws_ls, the app shows "// running tool: ws_ls ...",
+then the stream just ENDS — sine wave stops, [stop] flips back to [send], no error
+shown anywhere. Same with ws_edit (and presumably ws_read/ws_write).
+
+## Root cause (reproduced in-process on Windows, not guessed)
+`backend/main.py` tool dispatch, ws_* branch: the `ws_ls`/`ws_read`/`ws_write`/
+`ws_edit` paths assigned only `ws_res` — `result`/`result_text` were assigned ONLY
+in the `ws_cd` sub-branch and the `else` (ws_mkdir) sub-branch. First tool call of
+the request hits `store.add_message(..., result_text)` with `result_text` UNBOUND →
+`UnboundLocalError` → the chat generator dies right after `tool_start` was yielded →
+the NDJSON response closes with no error event → frontend reader sees EOF →
+`onDone()` → streaming false. Silent stop, exactly as reported. (`build_*`,
+`run_python`, `read_document` set both vars, which is why decks/sheets kept working.)
+Regression came in with the ws_cd commit (2026-10-13): the shared
+`result_text = format_ws_result(ws_res)` got scoped into the mkdir/ws_cd paths only.
+The earlier E2E verified build_* + ws_cd but never ws_ls/read/write/edit through the
+chat path — that's the test gap.
+
+## Fixes (backend/main.py only; no frontend change, no rebuild of dist)
+1. Generic `result`/`result_text` assignment now applies to every ws_* tool except
+   ws_cd (which sets its own "[project: ...]" text): `if name != "ws_cd":`.
+2. Defaults-before-dispatch: `result`/`result_text` are initialized BEFORE the
+   dispatch chain ("[internal error: tool 'X' produced no result...]"). No branch
+   can leave them unbound (this bug class now degrades to a visible tool error the
+   model can react to, and the loop continues), and a second tool call can never
+   reuse the previous call's stale result text.
+
+## Verification
+- New repro `report/report/repro-tool-loop.py` (APPDATA redirected to a temp dir —
+  user's real DB/workspace untouched): drives the REAL /api/chat generator with a
+  scripted two-round ollama stub across 10 cases — ws_ls (with and without args),
+  ws_read, ws_edit, ws_write, ws_mkdir, ws_cd, build_pptx, read_document, unknown
+  tool. ALL 10 complete the loop (tool_start + tool event + done). Before the fix,
+  ws_ls died with UnboundLocalError (traceback captured).
+- `ast.parse` clean; test temp dirs cleaned from %TEMP%.
+
+## User action needed
+Restart the app so the backend picks up the fix (no frontend rebuild needed).
+NOTE: the freshly built Su1ra-setup-x64.exe PREDATES this fix — rebuild the
+installer if the fixed build should ship.
+
+---
+
+# Su1ra work session — 2026-10-15 (per-mode system prompts + per-chat mode persistence)
+
+## Ask
+1. Rebuilt sysp.txt needs to re-seed — verified it happens automatically on next
+   boot (stored default was pristine == marker; new 10932-char text pushes).
+2. sysp.txt showed in BOTH modes' settings boxes — casual must not show/carry it;
+   each mode gets its own system prompt (casual ships EMPTY by user's choice).
+3. /chats: one mixed list — want BUILD and CASUAL split (left/right columns).
+4. Opening an old build chat from casual must switch the mode automatically.
+
+## Root causes
+- PROMPT LEAK: frontend STAMPED the global default (sysp.txt) into every new
+  conversation's per-chat system_prompt at creation (chatDefaultsRef spread),
+  and SettingsModal displays per-chat-else-default -> sysp visible in casual.
+  Backend only ever SENT it in build, so it was display + stored-data leak.
+- NO MODE PERSISTENCE: conversations had no mode column at all — mode was
+  per-request (body.code_mode) + transient frontend state, so reopening a chat
+  could not restore what it was.
+
+## Implementation
+Backend:
+- store.py: conversations.code_mode column (ALTER migration), _conversation_dict
+  exposes it, create/update accept it. One-time normalization (guard setting
+  perchat_sysp_norm): clears per-chat system_prompt stamps that are byte-equal
+  to a bundled default (old marker or new text) — customs survive; backfills
+  code_mode=1 for chats that produced tool messages (only build chats did).
+- main.py: ConversationCreate/Update + endpoints accept code_mode;
+  default_system_prompt_casual setting (GET/PATCH); chat() resolves
+  per-chat override -> else mode default (build=sysp.txt, casual=casual default).
+  Build still appends the tool directive + project context after it.
+Frontend (App.jsx):
+- createConversation calls (newChat, send lazy-create, attachment lazy-create):
+  no system_prompt stamp; pass code_mode (chat tagged with birth mode).
+- selectConversation: MODE FOLLOWS THE CHAT — flips codeArmed + picker model +
+  new-chat ctx defaults to the target loadout (deliberately lighter than
+  /build: no settings rewrite, no forced IDE open), background eviction.
+- Manual /build // /casual with a chat open: retagActiveChat patches its mode.
+- /chats: two monospace columns (BUILD left, CASUAL right), global ordinals
+  kept so /chats <n|id> resolution is unchanged; 20-row cap with overflow note.
+- /modes: sysprompt label reflects real resolution (per-chat / sysp.txt /
+  casual default / off).
+- saveSettings: systemPromptScope ('default'|'chat') — default edits write
+  default_system_prompt (build) or default_system_prompt_casual (casual) only;
+  per-chat edits patch the open chat only. No cross-stamping ever again.
+- SettingsModal: mode prop + defaultSystemPromptCasual prop; shows per-chat
+  override else the MODE's default; reset = bundled sysp (build) / empty
+  (casual); scoped autosave payload.
+- frontend rebuilt (yarn build) — served by backend on :8000.
+
+## Verification
+- report/report/repro-mode-prompts.py — 19 checks, ALL PASS (isolated APPDATA):
+  casual default ships empty; build default = sysp.txt; normalization clears
+  stamps + keeps customs + backfills tool-msg chats; code_mode persists through
+  create/update; prompt resolution matrix (build/casual x default/override/none,
+  no cross-leak); API models accept the fields.
+- report/report/repro-tool-loop.py — 10/10 tool cases still pass after changes.
+
+## User action needed
+Restart the app (backend + rebuilt UI). Normalization runs once on boot: old
+chats whose per-chat prompt == a bundled default are cleared; chats with tool
+history retag as build. Installer predates all of today's fixes — rebuild
+before shipping.
+
+## Follow-up same day — /build and /casual now open a NEW chat in the target mode
+User: switching modes stayed in the same chat, which fights the per-chat mode
+model (and retagging on switch was the wrong move). New semantics:
+- Mode switch (via /build toggle, /build toggle-off, /casual) = a FRESH chat on
+  the new desk. The chat being left is untouched — it keeps its mode + history
+  and stays in its /chats column.
+- Empty current chat (no messages yet) is RETAGGED + REUSED instead of creating
+  another empty shell (startModeChat) — toggling back and forth can't spam /chats.
+- selectConversation still follows the chat's mode (unchanged).
+- retagActiveChat removed (was dead the moment switches stopped retagging);
+  applyModelCtx no longer patches the active conversation (picker + new-chat
+  defaults only).
+- One-shot /build <msg> unchanged (arms for one message in the current chat).
+Frontend rebuilt; repro suites re-run: 19/19 mode-prompt checks + 10/10 tool
+loop cases pass.
+
+## Follow-up same day — /ide → /editor, general-purpose file-type editor
+- Renamed across user surfaces: /editor command (/ide kept as hidden alias,
+  /code precedent), pane title "editor", COMMANDS list, attachEditorRun label
+  ("// attached: editor run — <file> (exit n)", ext-matched code fence),
+  sendEditorToChat wording. Component file IdePane.jsx → EditorPane.jsx;
+  state ide* → editor*. Settings keys STAY ide_open/ide_width (DB compat,
+  code_mode precedent). CSS: new .ide-filename header input.
+- Generalized from python-only to file-type-aware: the buffer belongs to a
+  filename (editable header field, default scratch.py). Run saves the buffer
+  to <DATA_DIR>/scratch/<filename> and executes THE FILE by extension —
+  .py (frozen-aware python_exe(): sys.executable in the bundled exe is
+  su1ra.exe, NOT python — latent bug fixed), .js/.mjs/.cjs (node), .sh/.bash,
+  .ps1, .bat/.cmd, .rb, .pl, .lua. Missing interpreter or non-runnable ext
+  (md/txt/json = save-only) → clean 422; frontend disables run + status hint.
+  Filename sanitized (_FILENAME_RE, basename, traversal rejected).
+- New POST /api/editor/file (save without run). PtySession generalized to
+  (argv, cwd, env); legacy Windows path spawns argv (30s cap kept).
+- Verification: report/report/repro-editor.py 11/11 PASS (py runs from file +
+  __file__ semantics, node, cmd bat, md 422, traversal/subdir rejected, ruby
+  missing-interp 422, save endpoint + validation); mode-prompt suite 19/19 +
+  tool-loop 10/10 still green. Frontend rebuilt.
+
+## Follow-up — html/svg in the editor: run = preview (user asked why "save only")
+page.html showed "not runnable — save only": RUNNABLE only listed terminal
+interpreters. Added PREVIEWABLE (html/htm/svg): run button enabled, labeled
+"preview", saves + hands the buffer to the artifact pane (onPreview ->
+setArtifact + preview tab, path null = buffer-backed). True non-runnable types
+(md/txt/json) keep the save-only state. Frontend rebuilt.
+
+## Follow-up — system monitor (btop-lite) in the composer foot, bottom-left
+- Backend: /api/sysmon + SYSMON sampler task (started from the startup event,
+  2s cadence, pure stdlib — NO psutil, frozen build unchanged). cpu =
+  GetSystemTimes delta (Win) / /proc/stat delta (Linux, needs one tick);
+  ram = GlobalMemoryStatusEx dwMemoryLoad (Win) / MemTotal-MemAvailable
+  (/proc/meminfo); disk = shutil.disk_usage(DATA_DIR) — NOTE shutil has NO
+  .percent (that's psutil) — computed used/total; gpu = nvidia-smi
+  utilization (+ vram fill) discovered once in a worker thread, null when
+  absent (Intel/AMD iGPU boxes get a dimmed empty bar, tooltip 'unavailable').
+  Verified live on this machine: cpu 28.1 / ram 54 / disk 87 / gpu null.
+- Frontend: SysMonitor.jsx polls every 2s; 2x2 grid of thin bars, each between
+  literal [ ] brackets, colored fills (G gpu = --accent, M ram = --sm-green,
+  D disk = --sm-amber, C cpu = --sm-blue), NO numbers on screen — real values
+  in the hover tooltip only. Positioned fixed bottom-left (24px/14px); hidden
+  under 1180px window width so it never collides with the centered composer.
+  Rendered in Composer's new .composer-foot row (sysmon left, hint right).
+- frontend rebuilt; endpoint smoke-tested via TestClient (200 + live values).
+
+## Fix — sysmon "bars do nothing" (user report)
+Diagnosis from screenshot: brackets rendered (new frontend live) but all fills
+empty -> the RUNNING backend pre-dated /api/sysmon (netstat showed :8000
+TIME_WAIT, no listener at check time; app closed). Frontend polls were 404ing
+-> stats stayed null. Fix = full app restart. Also fixed a real bug found
+while diagnosing: the sampler task was fire-and-forget create_task (no held
+reference — asyncio may GC it); now start_sysmon() holds _sysmon_task.
+SysMonitor now distinguishes offline (3 consecutive failed polls -> cluster
+dimmed, container tooltip 'restart the app') from per-bar unavailable.
+Rebuilt frontend; boot-path test (reset_session_settings -> sampler live ->
+endpoint 200 with cpu/ram/disk) passes.
+
+## Follow-up — editor v2: .scratch root + explorer + dirty/ctrl+s + CodeMirror
+- Scratch root moved to ~/Documents/.scratch (user-visible, dot-prefixed app
+  folder). One-time migration: legacy %APPDATA%/su1ra/scratch files COPIED
+  (not moved) into the new root on first editor_root() call (process-level
+  flag; skipped when root exists).
+- Subfolders now first-class: _editor_rel_path validates slash paths
+  ('proj/main.py', per-segment regex, ../ and . rejected, resolved-inside-root
+  check), /api/run cwd = the file's PARENT dir (sibling imports work in
+  projects), save creates parent dirs. rel from /api/editor/open is
+  as_posix()-normalized (Windows backslashes confused the frontend test).
+- New endpoints: GET /api/editor/open?path= (read into buffer, 400k cap,
+  404/422 clean), GET /api/editor/tree (recursive tree, depth 5, 800 entries,
+  dirs-before-files), POST /api/editor/mkdir (folders OR empty files).
+- Frontend EditorPane: CodeMirror 6 (basicSetup + per-ext langs py/js/html/
+  css/json/md; theme Compartment follows data-mode light/dark, transparent
+  bg, mono; Mod-s keymap), external code changes dispatched into CM, custom
+  gutter dropped (CM line numbers). Explorer sidebar (files toggle): tree,
+  click file = open (loads content + snapshot), [+file]/[+dir] with
+  collision-avoiding names. Dirty = code !== snapshot: '· unsaved' next to
+  filename + in status line; ctrl+s saves (window listener + CM keymap);
+  save refreshes tree. run() reads codeRef (no stale prop).
+- Verification: repro-editor2.py 12/12 (migration, subpath save/open/mkdir,
+  tree nesting, run-with-sibling-import + cwd, traversal still blocked);
+  repro-editor.py updated for new root (11/11); mode-prompts 19/19 +
+  tool-loop 10/10 green. Frontend built with CM bundles.
+
+## Follow-up — btop-flavored editor pane + movable bottom section
+- Bottom output/terminal wrapped in .ide-bottom (fixed px height, default 240):
+  tinted top border (color-mix accent 38% + border), four box-drawing corner
+  glyphs (┌┐└┘, absolutely positioned ON the line, panel bg masks under,
+  pointer-events none), and an .ide-split drag row (label "output" punched
+  into the border line + centered ··· grip; pointer capture pattern per
+  AGENTS.md — onPointerDown/Move/Up/Cancel, body.pane-resizing reused to mute
+  iframes). Drag up = taller; clamp [90, paneHeight-280]; xterm refits via
+  existing ResizeObserver + fit effect deps now include termH.
+- Pane outer border tinted accent (22% mix, right edge flush); status bar is
+  an inverted-ish strip: accent 9% bg + btop-line top border + brighter text.
+- build clean. (Visual: verified only structurally — user confirms on screen.)
+
+## Follow-up — full btop panel system + accent-derived hue family
+- Every section of the editor pane is now its own btop-style bordered box,
+  not just the output: `.panel` class (border, relative, column flex) with
+  hue modifiers `.h-a/b/c/d` that set `--ph` (panel hue); `--ph-line` is
+  `color-mix(--ph 38%, border)`. Three panels in `.ide-body` + bottom:
+  scratch explorer = h-b, code editor = h-a, output = h-c. Each gets a
+  punched `.panel-title` (absolute, top -7px, panel bg masks the border
+  line under it) and a shared `Corners()` component — ┌┐└┘ absolutely
+  positioned ON the corners, panel bg padding masks the line beneath,
+  pointer-events none. Title + borders + corner glyphs all take `--ph`,
+  so recoloring is one custom prop per panel.
+- Splitter visually merged into the top border: `.split-label` ("output")
+  punched into the line like a panel title, `···` grip centered, hover
+  brightens both toward --ph.
+- Hue family (theme.js): `deriveHueFamily(hex)` derives an ANALOGOUS
+  4-color set from any accent — --h-a IS the accent, --h-b rotates +45°,
+  --h-c −50°, --h-d +105°, with saturation damped (×0.8/0.75/0.6, cap
+  0.85) and lightness pulled into a readable band (0.2–0.72). HSL rotation
+  implemented from scratch (hex→hsl→hex, ~15 lines) — no color lib.
+  `applyAccent()` now sets all four vars, so every accent pick re-tints
+  the whole panel system in-family (crimson → raspberry/teal, amber →
+  gold/green). Duplicate applyAccent removed.
+- Consumers: SysMonitor meters switched from hardcoded `--sm-green/amber/
+  blue` to `--h-b/c/d` (G = accent, M = h-b, D = h-c, C = h-d), cell color
+  passed as inline `--sm-c`; ide-status bar bg = `--h-a` 8% mix; pane
+  outer border keeps its accent tint.
+- CSS gotcha: `body.pane-resizing .ide-pane { pointer-events: none }`
+  (pane-drag mute) also killed splitter drag INSIDE the pane — override
+  added: `body.pane-resizing .ide-split { pointer-events: auto }`.
+- Frontend built clean. Visual check still pending user restart (structure
+  verified in code only).
+
+## Installer rebuilt (2026-10-15 late)
+- Full chain: `yarn build` (frontend) → `.venv/Scripts/python.exe -m
+  PyInstaller packaging/su1ra.spec --noconfirm --distpath packaging/dist
+  --workpath packaging/build` (~51s) → Inno Setup
+  `"$LOCALAPPDATA/Programs/Inno Setup 6/ISCC.exe" packaging/su1ra.iss`
+  (12.4s) → `packaging/output/Su1ra-setup-x64.exe` (30.3 MB, 22:13 — was
+  19.2 MB at v0.3.0; growth = CodeMirror 6 + document-import deps).
+- Bundle verified structurally: Analysis-00.toc contains main/store/
+  gpumon (gpumon.py picked up from backend/), sysp.txt + frontend/dist
+  datas embedded; ISCC "Successful compile". NOT verified end-to-end
+  (no silent install/launch test was run).
+- SHA256: 1F2A041EB96CDBCA7A8E3DE945E105397D2822DA0EBAC6033BC9930982859411
+
+## Version → 0.3.2 + installer rebuilt with new metadata
+- Bumped in all five spots: README title, AGENTS.md header, frontend/package.json,
+  header brand-ver in App.jsx (UI shows the version — frontend rebuilt for it),
+  su1ra.iss AppVersion. Full chain re-run (yarn → PyInstaller → ISCC, 12.9s).
+- Exe metadata: ProductVersion 0.3.2. New SHA256:
+  96E01BF03DD4AEDC38AA468B3204E560B1870CEFCDA9873B202A281C59350F1F
+  (supersedes the 22:13 build hashed above — that one still said 0.3.1).
+- report/AGENTS.md mirror re-synced after the version edits.
+- WSL sandbox clarification for the record: the v0.3.1 commit message says
+  "sandbox for windows via WSL" but NO WSL code exists in the repo (grep clean
+  2026-10-15) — that item is the PARKED task report/report/sandbox-wsl-task.md.
+  Windows tool runs today are UNSANDBOXED (bwrap is Linux-only) with only
+  runner caps + the loud "sandbox: unavailable" label. Don't repeat the claim
+  in release notes.
+
+## WSL sandbox plan expanded in fplan (still unapproved/queued — user: "will add later")
+- fplan.md "v2 ideas" one-liner → full plan block: option sweep of record
+  (AppContainer reads user files; Windows Sandbox Pro-only + API-less; Hyper-V
+  heavier; Job Objects ≠ isolation; Sandboxie driver burden; Docker = WSL
+  underneath → WSL2 + bwrap wins), sandbox_backend setting, copy-into-distro-fs
+  shape, probe chain, UTF-16 gotcha, scope guard (editor run button stays
+  unsandboxed), acceptance summary, machine status. sandbox-wsl-task.md got a
+  2026-10-15 probe update (WSL2+Arch present; python3/bwrap not installed yet).

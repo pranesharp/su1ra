@@ -112,6 +112,13 @@ def init_db():
             conn.execute("ALTER TABLE attachments ADD COLUMN text TEXT")
         if "meta" not in att_columns:
             conn.execute("ALTER TABLE attachments ADD COLUMN meta TEXT")
+        # Per-conversation mode (v0.3.1): which desk a chat belongs to — build
+        # or casual. Never persisted before, so opening an old build chat
+        # could not restore the mode. 0 = casual, 1 = build.
+        conv_columns = {r[1] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+        if "code_mode" not in conv_columns:
+            conn.execute("ALTER TABLE conversations ADD COLUMN code_mode INTEGER NOT NULL DEFAULT 0")
+
         # Seed / refresh the bundled system prompt:
         # - NULL means "never set" -> insert bundled.
         # - An explicitly cleared ("") default is left alone.
@@ -165,6 +172,34 @@ def init_db():
                     "UPDATE settings SET value = ? WHERE key = 'default_system_prompt_bundled'",
                     (bundled,),
                 )
+        # One-time normalization (guarded by marker): older builds STAMPED the
+        # global default into every new conversation's per-chat system_prompt,
+        # which made the bundled build prompt leak into casual mode (per-chat
+        # overrides win over mode defaults). Clear stamps that are byte-equal
+        # to a bundled default we shipped (old marker or the new text);
+        # genuine custom prompts differ and survive. Also backfill code_mode:
+        # only build chats ever produced tool messages.
+        norm = conn.execute("SELECT value FROM settings WHERE key = 'perchat_sysp_norm'").fetchone()
+        if not norm and bundled.strip():
+            old_marker = marker["value"] if marker else ""
+            conn.execute(
+                "UPDATE conversations SET system_prompt = '' WHERE system_prompt = ?",
+                (bundled,),
+            )
+            if old_marker and old_marker != bundled:
+                conn.execute(
+                    "UPDATE conversations SET system_prompt = '' WHERE system_prompt = ?",
+                    (old_marker,),
+                )
+            conn.execute(
+                "UPDATE conversations SET code_mode = 1 WHERE id IN "
+                "(SELECT DISTINCT conversation_id FROM messages WHERE role = 'tool')"
+            )
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('perchat_sysp_norm', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (bundled,),
+            )
 
 
 def get_setting(key):
@@ -208,6 +243,7 @@ def _conversation_dict(row):
         "temperature": row["temperature"],
         "context_length": row["context_length"],
         "think": row["think"] if "think" in keys else None,
+        "code_mode": bool(row["code_mode"]) if "code_mode" in keys else False,
         "created_at": row["created_at"],
     }
 
@@ -218,12 +254,12 @@ def list_conversations():
         return [_conversation_dict(r) for r in rows]
 
 
-def create_conversation(title="", model="", system_prompt="", temperature=0.7, context_length=0, think=None):
+def create_conversation(title="", model="", system_prompt="", temperature=0.7, context_length=0, think=None, code_mode=False):
     think = normalize_think(think)
     with _connect() as conn:
         cursor = conn.execute(
-            "INSERT INTO conversations (title, model, system_prompt, temperature, context_length, think) VALUES (?, ?, ?, ?, ?, ?)",
-            (title, model, system_prompt, temperature, context_length, think),
+            "INSERT INTO conversations (title, model, system_prompt, temperature, context_length, think, code_mode) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (title, model, system_prompt, temperature, context_length, think, 1 if code_mode else 0),
         )
         row = conn.execute("SELECT * FROM conversations WHERE id = ?", (cursor.lastrowid,)).fetchone()
         return _conversation_dict(row)
@@ -239,10 +275,12 @@ def update_conversation(conversation_id, **fields):
     allowed = {
         k: v
         for k, v in fields.items()
-        if k in ("title", "model", "system_prompt", "temperature", "context_length") and v is not None
+        if k in ("title", "model", "system_prompt", "temperature", "context_length", "code_mode") and v is not None
     }
     if "think" in fields:
         allowed["think"] = normalize_think(fields["think"])
+    if "code_mode" in allowed:
+        allowed["code_mode"] = 1 if allowed["code_mode"] else 0
     if not allowed:
         return get_conversation(conversation_id)
     sets = ", ".join(f"{k} = ?" for k in allowed)

@@ -1,4 +1,4 @@
-# AGENTS.md — Su1ra v0.3.1
+# AGENTS.md — Su1ra v0.3.2
 
 Local-first, terminal-styled desktop chat app for Ollama models. Everything runs on
 the user's machine: React+Vite frontend, FastAPI backend (:8000), pywebview desktop
@@ -30,7 +30,7 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
   (streamTargetRef — deltas target the streaming assistant BY ID; onTool attaches
   by role), background model eviction (`unloadInBackground`)
 - `frontend/src/components/` — ChatView (markdown+math, user msg copy/edit/redo),
-  IdePane (xterm.js), ArtifactPane (sandboxed iframe; shows file path in workspace
+  EditorPane (CodeMirror 6 buffer + xterm output; was IdePane), ArtifactPane (sandboxed iframe; shows file path in workspace
   mode), ModelHub (catalog), OllamaSetup (first-run callout + troubleshooting
   bridge), SettingsModal (autosave), TitleBar (floating window controls — auto-hides
   without js_api), theme.js
@@ -44,6 +44,23 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
 
 - **casual** vs **build** mode. Per-mode loadout: model, context length, think
   on/off, system prompt (build mode appends the file-workflow directive).
+- **System prompts are per-mode (2026-10-15):** build default = sysp.txt seed
+  (`default_system_prompt`); casual default = `default_system_prompt_casual`
+  (ships EMPTY — user's choice). Resolution: per-chat override → else mode
+  default; empty = no system role sent. SettingsModal is mode-aware (mode prop)
+  and saves with `systemPromptScope` 'default'|'chat' — default edits never
+  re-stamp the open chat. NEVER stamp a global default into a new conversation's
+  `system_prompt` at create time (that was the leak; one-time normalization
+  `perchat_sysp_norm` cleared old stamps, customs survive).
+- **Mode is persisted per conversation** (`conversations.code_mode`, 0/1):
+  createConversation passes it (birth mode). **Mode switch = new chat**:
+  `/build` (both toggle directions) and `/casual` call `startModeChat` — a
+  fresh chat on the new desk; the chat being left keeps its mode/history
+  (an EMPTY chat with zero messages is retagged + reused instead). **Opening
+  a chat follows the chat** — `selectConversation` flips codeArmed + picker/
+  new-chat defaults to its mode's loadout (light switch: no settings rewrite,
+  no forced IDE). `/chats` renders TWO columns (BUILD left, CASUAL right)
+  from `code_mode`; ordinals stay global for `/chats <n|id>`.
 - **Naming (2026-10-13):** the mode the user sees is **build** (`/build`) — renamed
   from "code" because it covers decks/docs/sheets/SVGs, not just code. INTERNAL
   identifiers keep the old names on purpose (no DB/API migration): API field
@@ -159,6 +176,22 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
   extended-limit struct — basic class rejects with err 87) + scoped child-reap;
   closes the llama-server.exe orphan/leak class. Linux: killpg.
 - `/eject` also kills `llama-server.exe`.
+- **Sysmon (2026-10-15):** `/api/sysmon` + background sampler (2s, pure stdlib
+  — no psutil) in main.py; `SysMonitor.jsx` renders 2x2 SEGMENTED meters (10 fixed-px
+  blocks between [ ], ghost blocks when idle; G/M/D/C, colors from the
+  accent-derived hue family (G = accent, M = --h-b, D = --h-c, C = --h-d —
+  NOT hardcoded green/amber/blue anymore; inline `--sm-c` per cell),
+  no numbers, tooltip only; NEVER %-width fills inside the shrink-to-fit track —
+  that rendered every bar at 0px). States: live / unavailable (flat line) /
+  offline (cluster dimmed) fixed bottom-left in the
+  composer foot; hidden < 1180px. GPUs: `backend/gpumon.py` (in spec
+  hiddenimports) → `gpus` list, iGPU FIRST. Windows = DXGI EnumAdapters1
+  (ctypes vtable: factory slot 12, GetDesc1 slot 10; skip software adapter)
+  + PDH `\GPU Engine(*)\Utilization Percentage` (sum per engine, adapter =
+  busiest engine — Task Manager rule; any vendor incl. Intel iGPU/Vulkan) +
+  `GPU Adapter Memory` for the tooltip. Linux = AMD sysfs + nvidia-smi.
+  Layout: col1 = M then G_{n-1}..G₁, G₀ at the BOTTOM (extra GPUs stack
+  upward on G₀); col2 = D over C; columns bottom-aligned. shutil.disk_usage has NO `.percent` — compute used/total.
 - pywebview **frameless chrome is PARKED**: flaky WinForms init race in pywebview
   6.2.1 (app hang, black window, intermittent — bisected clean at every step).
   Do not retry without a newer pywebview or different shell. Mitigations that stay:
@@ -174,13 +207,51 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
   inside the modal needs a `.modal`-scoped override or it stretches and crushes
   flex siblings (broke the ctx slider once; commit 0d65371).
 - `.gitattributes` marks `yarn.lock` linguist-generated.
+- `body.pane-resizing .ide-pane { pointer-events: none }` (pane-drag mute)
+  reaches INSIDE the pane and kills the `.ide-split` drag row — keep the
+  override `body.pane-resizing .ide-split { pointer-events: auto }`.
 
 ## Command surface
 
 /help · /models (+ `pull <name>`, `get [query]`) · /chats · /delchat (<n|id>, `all`
 wipes everything) · /clear (current chat messages only, chat + settings kept) ·
 /newchat · /build (toggle; `<msg>` one-shot; /code hidden alias) · /casual · /modes · /mkdir · /cd ·
-/settings · /stats · /ide · /eject · /connect · /web <url|query>
+/settings · /stats · /editor (/ide alias) · /eject · /connect · /web <url|query>
+
+## Editor pane (2026-10-15 — renamed from /ide, general-purpose)
+
+- **v2 same day:** files live in `~/Documents/.scratch` (`editor_root()`; the
+  legacy APPDATA scratch is copied over once). Subpaths are first-class:
+  `_editor_rel_path` validates per segment (no `..`), run cwd = the file's
+  PARENT dir (sibling imports), save auto-creates parents. `/api/editor/open`
+  reads a file back into the buffer (400k cap; `rel` is `as_posix()`), 
+  `/api/editor/tree` = recursive listing (depth 5, 800 entries), 
+  `/api/editor/mkdir` makes folders or empty files. Frontend: CodeMirror 6
+  (basicSetup + per-ext lang; theme Compartment follows data-mode; Mod-s
+  keymap + window ctrl+s), explorer sidebar (open / [+file] / [+dir]),
+  dirty = `code !== snapshot` → `· unsaved` marker. run() reads `codeRef`.
+- `/editor` toggles the right pane (hidden `/ide` alias kept). Settings keys
+  STAY `ide_open`/`ide_width` (DB compat — same precedent as `code_mode`).
+  Component: `EditorPane.jsx`; state editorOpen/editorWidth/editorCode/editorName.
+- The buffer belongs to a FILENAME (header input, default scratch.py). Run
+  SAVES the buffer to `<DATA_DIR>/scratch/<filename>` and executes the FILE by
+  extension: .py → python (frozen-aware `python_exe()` — sys.executable in the
+  bundled exe is su1ra.exe, NOT python; fall back PATH python/py), .js/.mjs/.cjs
+  → node, .sh/.bash → bash/sh, .ps1 → powershell -File, .bat/.cmd → cmd /c,
+  .rb/.pl/.lua. Missing interpreter / non-runnable ext (md, txt, json…) →
+  clean 422 (frontend disables run: "save only"). Filename validated by
+  `_FILENAME_RE` (basename, no traversal). `POST /api/editor/file` saves
+  without running. Legacy (non-PTY/Windows) path spawns argv with 30s cap;
+  Linux PtySession now takes (argv, cwd, env) — generic exec, was python -c.
+  attachEditorRun labels `// attached: editor run — <file> (exit n)` with
+  ext-matched fence.
+- **btop panels (2026-10-15):** every pane section is a `.panel.h-a/b/c`
+  box (scratch explorer=h-b, code editor=h-a, output=h-c) with punched
+  `.panel-title` + `Corners()` glyphs (┌┐└┘ on the border line). Panel hue
+  = one custom prop `--ph` / `--ph-line`; the four hues come from
+  `theme.js` `deriveHueFamily(accent)` (analogous rotations +45/−50/+105,
+  sat damped) set by `applyAccent()` as `--h-a/b/c/d` — recolors the whole
+  system on every accent pick.
 
 ## History semantics
 
@@ -244,7 +315,7 @@ wipes everything) · /clear (current chat messages only, chat + settings kept) �
 - Sandbox task (WSL-on-Windows) is WRITTEN UP AND PARKED on purpose:
   report/report/sandbox-wsl-task.md — do not start it unless the user asks; they will
   do it later with a different agent, possibly on the Windows boot.
-- Queued next (user's list, not started): v0.3.1 GitHub release + SHA256 checksums +
+- Queued next (user's list, not started): v0.3.2 GitHub release + SHA256 checksums +
   terminal-styled landing page wired to releases/latest; npm-vs-yarn decision (README
   says yarn, package-lock.json tracked, npm absent on this Arch box — yarn used here);
   user said "new bug reports coming" (their reporttest.md items are marked PAST — wait
