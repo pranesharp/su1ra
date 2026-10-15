@@ -26,6 +26,7 @@ import ollama_setup
 import pptx_builder
 import puller
 import runner
+import sandbox
 import store
 import workspace
 
@@ -48,6 +49,7 @@ async def reset_session_settings():
     for key in ("show_stats", "ide_open"):
         store.set_setting(key, "0")
     start_sysmon()
+    start_wsl_warm_probe()
 
 
 # Held reference — asyncio keeps only weak refs to tasks; an unreferenced
@@ -59,6 +61,29 @@ def start_sysmon():
     global _sysmon_task
     if _sysmon_task is None or _sysmon_task.done():
         _sysmon_task = asyncio.create_task(sysmon_sampler())
+
+
+# Held reference — same pitfall as _sysmon_task.
+_wsl_probe_task = None
+
+
+def start_wsl_warm_probe():
+    """Windows only: warm the WSL probe cache at boot so the first sandboxed
+    tool run doesn't pay the distro cold-start on the model's clock. Best
+    effort — a failure here must never break startup."""
+    global _wsl_probe_task
+    if os.name != "nt" or store.get_setting("sandbox_backend") == "off":
+        return
+    if _wsl_probe_task and not _wsl_probe_task.done():
+        return
+
+    async def _warm():
+        try:
+            await asyncio.to_thread(sandbox.wsl_probe)
+        except Exception:
+            pass
+
+    _wsl_probe_task = asyncio.create_task(_warm())
 
 
 # --- system monitor (btop-lite) ---------------------------------------------
@@ -196,14 +221,10 @@ _FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,80}$")
 
 
 def python_exe():
-    """A real python interpreter. Frozen: sys.executable is the app exe, NOT
-    python (spawning it would relaunch Su1ra) — fall back to PATH/launcher."""
-    if not getattr(sys, "frozen", False):
-        return sys.executable
-    for cand in (shutil.which("python"), shutil.which("python3"), shutil.which("py")):
-        if cand:
-            return cand
-    return None
+    """A real python interpreter — same resolver the run_python tool uses.
+    (Kept as a thin alias: one rule for "never spawn our own exe as a child",
+    so the editor path and the tool path cannot drift apart again.)"""
+    return runner.python_exe()
 
 
 def build_run_argv(filename):
@@ -659,7 +680,10 @@ def tool_result_text(result):
     else:
         status = f"exit {result['exit']}"
     if result.get("sandbox") == "unavailable":
-        status += " — sandbox: unavailable, ran unsandboxed (install bubblewrap)"
+        reason = result.get("sandbox_reason")
+        status += " — sandbox: unavailable, ran unsandboxed"
+        if reason:
+            status += f" ({reason})"
     if not out.strip():
         return f"[no output — {status}]"
     return f"{out}\n[{status}]"
@@ -719,6 +743,7 @@ class SettingsUpdate(BaseModel):
     ide_open: bool | None = None
     ide_width: int | None = None
     sandbox_tools: bool | None = None
+    sandbox_backend: str | None = None
     default_system_prompt: str | None = None
     default_system_prompt_casual: str | None = None
     default_temperature: float | None = None
@@ -1112,6 +1137,7 @@ async def get_settings():
         "ide_open": store.get_setting("ide_open") == "1",
         "ide_width": int(store.get_setting("ide_width") or 460),
         "sandbox_tools": store.get_setting("sandbox_tools") != "0",
+        "sandbox_backend": store.get_setting("sandbox_backend") or "auto",
         "default_system_prompt": store.get_setting("default_system_prompt") or "",
         "default_system_prompt_casual": store.get_setting("default_system_prompt_casual") or "",
         "default_temperature": float(store.get_setting("default_temperature") or 0.7),
@@ -1141,6 +1167,7 @@ async def update_settings(body: SettingsUpdate):
         and body.ide_open is None
         and body.ide_width is None
         and body.sandbox_tools is None
+        and body.sandbox_backend is None
         and body.default_system_prompt is None
         and body.default_temperature is None
         and body.default_context_length is None
@@ -1219,6 +1246,11 @@ async def update_settings(body: SettingsUpdate):
         store.set_setting("ide_open", "1" if body.ide_open else "0")
     if body.sandbox_tools is not None:
         store.set_setting("sandbox_tools", "1" if body.sandbox_tools else "0")
+    if body.sandbox_backend is not None:
+        v = body.sandbox_backend.strip().lower()
+        if v not in ("auto", "wsl", "off"):
+            raise HTTPException(422, "sandbox_backend must be auto, wsl, or off")
+        store.set_setting("sandbox_backend", v)
     if body.ide_width is not None:
         if not 280 <= body.ide_width <= 1200:
             raise HTTPException(422, "ide_width must be between 280 and 1200")
@@ -1636,6 +1668,7 @@ async def chat(body: ChatRequest):
                             code,
                             sandboxed=store.get_setting("sandbox_tools") != "0",
                             cwd=str(workspace.project_dir()),
+                            backend=store.get_setting("sandbox_backend") or "auto",
                         )
                         result_text = tool_result_text(result)
                     except Exception as exc:
@@ -1806,6 +1839,7 @@ async def run(body: RunRequest):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env={**os.environ, **env_over},
+                **runner.child_spawn_kwargs(),
             )
             RUN_STDIN[run_id] = proc.stdin
             queue = asyncio.Queue()

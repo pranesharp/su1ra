@@ -1,14 +1,34 @@
 # Task: WSL-backed sandbox for Windows tool runs
 
-Status: QUEUED (not started — nothing exists in the repo for this yet; verified
-2026-10-13 from this Linux clone: `backend/sandbox.py` is Linux-bwrap only, no WSL
-code in any commit local or remote, fplan checkbox unchecked).
+Status: IMPLEMENTED + VERIFIED (2026-10-16, Windows box). Repo code landed:
+`backend/sandbox.py` `wsl_probe()`/`wsl_wrap()`/`win_to_wsl()`, `runner.run_python`
+`backend=` param with a stdin-fed WSL branch, `backend/main.py` `sandbox_backend`
+setting (auto|wsl|off) + boot warm probe, SettingsModal backend select. Harness
+14/14 on real WSL (archlinux) + 7/7 failpaths + settings round-trip; full in-app
+e2e later with qwen3.5:0.8b (tool block showed uid 65534 / cwd /work / no /mnt /
+net blocked / [exit 0]; write-back landed in the active project on Windows).
+Acceptance checklist below ticked. Unproven: frozen exe + Linux regression run
+only. Full account in `session-log.md` (2026-10-16 close-out).
 Update 2026-10-15 (Windows boot probe): WSL2 + Arch distro ARE present; python3
 and bwrap are NOT installed in the distro (`sudo pacman -S python bwrap` prepares
 the box). Plan of record expanded in fplan.md "v2 ideas" — option sweep done
 (AppContainer reads user files, Windows Sandbox is Pro-only + API-less, Docker =
 WSL underneath → WSL2 + bwrap chosen). wsl.exe gotcha learned live: stdout is
 UTF-16, strip nulls when parsing.
+Update 2026-10-16 (discussion + probes, Windows box): READ THIS FIRST —
+`sandbox-wsl-plan-update.md` in this folder. It fixes two bugs in the plan
+below (the `wsl -e which bwrap` probe in "Design to implement" fails on Arch —
+`which` isn't installed; and `find_bwrap()` gates on Linux so `wrap()` argv as
+written CANNOT be passed straight to wsl.exe), resolves the plan's
+option-(a)/(b) evaluation with live probes (drvfs /mnt/c IS mounted, so the
+"home never mounted" framing only holds with the explicit tmpfs; distro has
+tar but lacks python3+bwrap; systemd=true), and puts 5 decision points (image
+shape, project I/O, first-run UX, cold-boot vs 30s cap, scope) in front of the
+user before implementation. No code written yet.
+
+Update 2026-10-16 (later): HANDOFF WRITTEN — `wsl-sandbox-handoff.md`. Distro
+now has python+bwrap; a hand-built wsl.exe→bwrap run was PROVEN end-to-end
+(net blocked, no /mnt, workdir bind read/write OK). Code not yet written.
 
 ## Why
 
@@ -61,11 +81,21 @@ WSL, where bwrap is available.
 
 ## Acceptance checklist (for whichever agent picks this up)
 
-- [ ] Settings: new backend selector round-trips (GET/PATCH), default `auto`
-- [ ] Windows + WSL present + bwrap in distro: tool run executes inside WSL bwrap,
+- [x] Settings: new backend selector round-trips (GET/PATCH), default `auto`
+      (verified live: auto→wsl→422(bogus)→off→auto; SettingsModal select added)
+- [x] Windows + WSL present + bwrap in distro: tool run executes inside WSL bwrap,
       network blocked, home hidden, scratch writable, output/exit reported correctly
-- [ ] Windows + no WSL / no bwrap: unsandboxed run + loud label + reason logged
+      (harness 14/14 + in-app e2e: uid 65534, cwd /work, no /mnt, minimal root,
+      net blocked [Errno 101], exit codes propagate, 30s inner-timeout cap)
+- [x] Windows + no WSL / no bwrap: unsandboxed run + loud label + reason logged
+      (failpath harness 7/7: mode=unavailable + sandbox_reason with the exact
+      one-time install command, shown in the tool block via tool_result_text)
 - [ ] Linux: behavior unchanged (bwrap path untouched — regression-test the two
       live checks above: net blocked, home-write no-trace)
-- [ ] `sandbox: "wsl"` (or equivalent) visible in the tool block metadata
-- [ ] No hard dependency: Su1ra must never fail to start because WSL/bwrap is absent
+      — pending: no Linux box in this session; code path is unchanged (wrap() /
+      find_bwrap untouched), needs one regression run
+- [x] `sandbox: "wsl"` (or equivalent) visible in the tool block metadata
+      (tool block printed uid/cwd/root/net lines; results carry sandbox=wsl/on/
+      off/unavailable + reason)
+- [x] No hard dependency: Su1ra must never fail to start because WSL/bwrap is absent
+      (probe is best-effort, warm probe swallows errors, backend=off just skips)

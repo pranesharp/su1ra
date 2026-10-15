@@ -1434,3 +1434,145 @@ endpoint 200 with cpu/ram/disk) passes.
   shape, probe chain, UTF-16 gotcha, scope guard (editor run button stays
   unsandboxed), acceptance summary, machine status. sandbox-wsl-task.md got a
   2026-10-15 probe update (WSL2+Arch present; python3/bwrap not installed yet).
+
+## BUGFIX 2026-10-15 (Windows box): run_python relaunched Su1ra — second app window
+- Report: user asked a model to build a script in /build mode; every `run_python`
+  call popped a SECOND Su1ra window. The screenshot's "tool output · 10 lines"
+  WAS that child's own boot log ([su1ra] window icon set → backend ready → ollama
+  ready), then `// timeout — killed after 30s` — a GUI child writes nothing to the
+  pipe, so the 30s cap killed it.
+- Root cause: `runner.run_python` spawned `sys.executable`. In the PyInstaller
+  build (`packaging/su1ra.spec` console=False) that is `su1ra.exe`; the bundle
+  ships `python314.dll` but NO python.exe (verified: none under
+  packaging/dist/Su1ra). main.py's EDITOR path had already been made
+  frozen-aware (commit-era `python_exe()`) — the tool path never got the fix, so
+  from-source runs looked fine and only the installed exe misbehaved.
+- Fix (backend/runner.py):
+  - `python_exe()` now lives in runner and is frozen-aware; honours
+    `$SU1RA_PYTHON`, skips candidates named like our own exe (`is_app_exe`) and
+    the zero-byte Store alias in `%LOCALAPPDATA%\Microsoft\WindowsApps\`
+    (`is_store_alias` — spawning that opens the Microsoft Store). `interpreter_root()`
+    follows the SAME interpreter (bwrap ro-bind target was pointing at the app dir).
+  - No interpreter found → clean tool result (`error: "no_python"`, install Python
+    or set SU1RA_PYTHON) instead of spawning a mystery exe.
+  - `child_spawn_kwargs()` → `CREATE_NO_WINDOW` on nt only (passing a non-zero
+    creationflags on POSIX raises in subprocess) so console children never flash:
+    applied to run_python, /api/run legacy path, `ollama._run_capture` (the
+    nvidia-smi/powershell probes ran every sysmon-ish call).
+  - main.py `python_exe()` = thin alias to runner's, so the two paths can't drift.
+- Verified (this box, source run): compile clean for runner/main/ollama/sandbox/
+  gpumon; `run_python('import sys; print(sys.executable)')` → exit 0, real
+  .venv python, no window; frozen-simulation (sys.frozen + APP_EXE_NAME=su1ra.exe)
+  → picks .venv/PyManager python, exit 0; frozen + Store-alias-only PATH →
+  None → `no_python` branch (Store never launched); uvicorn :8123 boot + live
+  `POST /api/run` → correct interpreter, exit 0.
+- NOT verified: the actual `packaging/dist/Su1ra/su1ra.exe` (needs an Inno
+  rebuild — `packaging/build-windows.bat`; the fix is proven under a simulated
+  frozen env, not the real exe). Rebuild before shipping.
+- Still open (out of scope, deliberately): `desktop.py` has no single-instance
+  guard, so any accidental relaunch = two windows + a second :8000 backend. The
+  fix removes the trigger; the belt-and-braces lock is a separate decision.
+- Unrelated to the parked WSL sandbox task (`sandbox-wsl-task.md`): that is about
+  CONTAINMENT of tool runs on Windows; this was about which interpreter runs them.
+  Windows tool runs are still unsandboxed + loudly labelled.
+
+## CLOSE-OUT 2026-10-16 (early): the "10-minute hang / files went missing" investigation
+- Method: read chat 55 straight from %APPDATA%\su1ra\app.db (messages + stats +
+  tool_calls columns). Timeline: 430 ws_mkdir zeta-transform ([folder created])
+  → ws_mkdir is ROOT-RELATIVE and does NOT switch projects (workspace.py:168),
+  global active_project stayed "cheat" → 434/436 ws_write landed in
+  cheat\index.html (7684 B @01:55) + cheat\zeta_transform.py (3385 B @01:58),
+  tool results literally read [cheat\...] — model did not react to that.
+  zeta-transform\ still EMPTY.
+
+ - 432/438 turns: unclosed <antml:thinking> block, stats column NULL → stream never
+  reached the done event, tool_calls NULL → content-fallback parser ignored it
+  (only fires when a candidate block STARTS with "{", main.py). The user-visible
+  "sat at a loading animation forever" (msg 432 alone ran ~10 min wall-clock)
+  was NOT the app hanging — the model was emitting a long rambling thought then
+  silently ended the turn ("Now I'll create a clean, well-designed webpage...").
+- DECISION (user, 2026-10-16): user re-ran the same sysprompt + same model and
+  the model behaved identically → judged a MODEL-side failure (ABQwen3.8-
+  4b:latest struggling at 12288 ctx), NOT a software-integrity bug. Therefore
+  do NOT add guardrails 1-3 (ws_mkdir autoswitch, done_reason-truncation
+  surfacing, promise-without-tool tripwire). They were proposed and
+  consciously DECLINED — do not re-propose them next session unless the user
+  reopens it. Note on ctx: ~9.6k tokens used of 12288 by msg 438 → raising the
+  build-loadout ctx slider (not the code) is the lever for small models.
+- Files left in place on purpose: cheat\index.html + cheat\zeta_transform.py
+  stay, zeta-transform\ stays empty — user may want them; do not clean up.
+- Relevance to the run_python fix: model never reached run_python, so that path
+  still only has simulated-frozen verification. The Inno rebuild + real
+  build/exe test remains the pending proof.
+
+## IMPLEMENTED 2026-10-16: WSL sandbox backend for Windows run_python
+- Follow-up to the handoff (report/report/wsl-sandbox-handoff.md): the code
+  plan is now written, wired, and verified on the Windows box (WSL archlinux +
+  bwrap + python3 prepared in the handoff session).
+- `backend/sandbox.py`: `win_to_wsl()` (drive path → /mnt/c/... direct, no
+  wslpath spawn), `_run_wsl()` (UTF-16-safe decode, CREATE_NO_WINDOW
+  via runner.child_spawn_kwargs, deferred import to break the runner↔sandbox
+  cycle), `wsl_probe()` (cached: 10 min ok / 60s fail; `wsl -l -q` → first
+  distro → `command -v bwrap; command -v python3` — never `which`, absent on
+  Arch; missing-package reason carries the exact one-time
+  `pacman -Syu --needed --noconfirm python bubblewrap` command, the stale-db
+  gotcha from the plan), `wsl_wrap(workdir)` (bwrap argv exactly as proven:
+  --unshare-all, uid/gid 65534, /usr ro + symlinks, /dev /proc tmpfs /tmp,
+  workdir → /work rw via drvfs, --clearenv, PATH /usr/bin, inner
+  `/usr/bin/timeout -s KILL 30 python3 -I -u -`).
+- `backend/runner.py`: `run_python(code, sandboxed, cwd, backend="auto")`.
+  Windows + auto|wsl → probe in a thread → wsl: code piped to python3 stdin
+  (NEVER argv), mode="wsl", outer wait_for TIMEOUT+15 so the distro cold start
+  isn't billed to the model; inner timeout maps exit 124/137 → timed_out. Probe
+  fail → unsandboxed fallback, mode="unavailable" + probe reason. backend off /
+  sandboxed False → mode off. Linux path untouched (regression).
+- `backend/main.py`: `sandbox_backend` setting (auto|wsl|off, validated) in
+  GET/PATCH; run_python dispatch passes backend; tool_result_text prints the
+  probe reason (with install command) instead of a generic bwrap hint; boot
+  warm probe `start_wsl_warm_probe()` (nt only, skips when off — best-effort
+  task like sysmon).
+- Frontend: SettingsModal gets «Sandbox backend (Windows): auto/wsl/off»
+  select (commitNow path, disabled when the toggle is off) next to the sandbox
+  toggle whose label no longer says "Linux only"; `.modal label.sandbox-row
+  select` CSS override (the .modal input/select width:100% gotcha again).
+  App.jsx boots sandboxBackend from settings, PATCHes it, passes it down.
+- VERIFIED (real runs on this box, not simulated): harness with the venv
+  python — 14/14: probe ok (archlinux), mode wsl, exit 0, print works,
+  cwd /work, uid 65534, root = bin/dev/lib/lib64/proc/sbin/tmp/usr/work
+  (no /mnt, no /etc), seed file read through the rw bind, out.txt written by
+  the script visible on Windows, net blocked (Errno 101), sys.exit(3) → exit 3,
+  `while True: pass` killed at 30.1s by the INNER timeout → timed_out + the
+  "killed after 30s" line. Failpaths 7/7 (probe-absent → unavailable + reason,
+  backend off / sandboxed False → off, real probe restores wsl). Live server on
+  :8124: clean boots with the warm probe firing, settings round-trip
+  auto→wsl→422(bogus)→off→auto, PATCH validation. Frontend rebuilt (vite build
+  3.85s, pre-existing bundle-size warning only).
+- E2E VERIFIED 2026-10-16 (after qwen3.5:0.8b pull): full in-app loop through
+  the served UI (backend :8000 + bundled ollama, clicked in a browser):
+  /build → new chat #57 (model qwen3.5:0.8b, loadout patched to it) → prompt
+  asking for an exact run_python script → model's tool call routed through
+  wsl_wrap → tool block rendered: `▸ tool: run_python · 11 lines` / 6 output
+  lines — uid 65534, cwd /work, has_mnt False, root ['bin','dev','lib',
+  'lib64','proc','sbin','tmp','usr','work'], net blocked [Errno 101] · [exit 0] —
+  assistant summary followed. Write-back check: e2e_marker.txt created by the
+  script inside bwrap landed at ~/Documents/su1ra_projects/cheat/ (the active
+  project = run cwd), marker cleaned after. This closes the prior "NOT verified"
+  gap; the only unproven surface left is the frozen exe + a Linux regression
+  run.
+- Two bugs caught by the harness while implementing: wsl_probe never committed
+  its result to _wsl_state (wsl_wrap always saw ok=False → silent unsandboxed
+  fallback); win_to_wsl dropped the slash after the drive letter
+  (/mnt/cUsers/…). Both fixed + re-verified green.
+- NOT verified: the in-app chat tool-block end-to-end (a build-mode message
+  where the model calls run_python and the tool block shows sandbox: wsl) —
+  ollama starts but this box has no model manifests (blobs orphaned, dirs
+  empty), so it needs a hub pull first. The dispatch line is one settings-read
+  away from the harness path, but claim nothing until it's clicked through.
+  Also unproven: real frozen exe (still needs the Inno rebuild), Linux
+  regression run (no Linux box in this session), workdir path with SPACES
+  through wsl.exe argv reconstruction (documented limitation).
+- Machine state at end of session: temp harness files in
+  %TEMP%/su1ra_wsl_harness.py + su1ra_wsl_failpaths.py (rerun anytime —
+  nothing in the repo depends on them). app.db sandbox_backend left at default
+  auto. git tree has the same uncommitted working-tree changes as before plus
+  sandbox/runner/main/App/SettingsModal/index.css edits and doc updates.

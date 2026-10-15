@@ -20,8 +20,12 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
   (default `~/Documents/su1ra_projects`); `safe_join` (resolve + symlinks) or deny;
   ls/read/write/edit/mkdir; **deliberately NO delete/rename tool — the model creates,
   the user deletes**
-- `backend/runner.py` — tool-run executor (30s timeout, 2000-line/1MB caps)
-- `backend/sandbox.py` — bubblewrap wrapper for tool runs (Linux only)
+- `backend/runner.py` — tool-run executor (30s timeout, 2000-line/1MB caps); also owns
+  the ONE python resolver `python_exe()` (main.py's editor `python_exe` is a thin
+  alias) + `child_spawn_kwargs()` (CREATE_NO_WINDOW on nt) — use both for any child spawn
+- `backend/sandbox.py` — sandbox wrappers for tool runs: `wrap()` = bubblewrap
+  (Linux, unchanged); `wsl_probe()`/`wsl_wrap()`/`win_to_wsl()` = WSL backend for
+  Windows (bwrap inside the WSL distro; model code rides STDIN, never argv)
 - `backend/ptyrunner.py` — real PTY for the IDE output terminal
 - `backend/store.py` — SQLite; `PROMPT_FILENAME = "sysp.txt"` seeds
   `default_system_prompt` (with `default_system_prompt_bundled` guard so replacing
@@ -176,6 +180,32 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
   extended-limit struct — basic class rejects with err 87) + scoped child-reap;
   closes the llama-server.exe orphan/leak class. Linux: killpg.
 - `/eject` also kills `llama-server.exe`.
+- **Never spawn `sys.executable` as a child (2026-10-15):** frozen, it IS
+  `su1ra.exe` (the bundle ships `python3xx.dll`, no `python.exe`), so the
+  `run_python` tool RELAUNCHED THE APP — a second Su1ra window whose boot log
+  came back as "tool output", then `// timeout — killed after 30s`. Use
+  `runner.python_exe()` everywhere (main.py's editor copy is now an alias); it
+  also skips the zero-byte Store alias in `…\WindowsApps\` (would open the
+  Store) and honours `$SU1RA_PYTHON`; no interpreter → clean tool result, never
+  a blind spawn. `runner.child_spawn_kwargs()` adds `CREATE_NO_WINDOW` (nt only
+  — POSIX raises on a non-zero creationflags) so console children do not flash
+  terminals; applied to runner, `/api/run` legacy path, `ollama._run_capture`.
+  Still open: `desktop.py` has no single-instance guard, so a relaunch = two
+  windows + a second :8000 backend.
+- **WSL sandbox backend (2026-10-16):** Windows tool runs route through
+  `wsl.exe -d <distro> -u root --cd / -e bwrap …` when `sandbox_backend` ∈
+  auto|wsl (default auto); off, or no WSL/bwrap/python3 → unsandboxed with a
+  loud label carrying the exact one-time install command. Distro-prep gotcha:
+  plain `pacman -S` fails on a stale db — use
+  `pacman -Syu --needed --noconfirm python bubblewrap` via `-u root`
+  (no password). Probe with `command -v`, never `which` (absent on Arch).
+  Model code is piped to `python3 -I <stdin>` — NEVER part of the argv
+  (wsl.exe quoting); workdir binds rw at /work (`win_to_wsl` → drvfs), no
+  /mnt (Windows drives invisible), uid 65534, no network. Warm probe at boot
+  (off the request path) so the distro cold start isn't counted against the
+  cap: inner timeout stays 30s (inside bwrap), outer wait_for loosened +15s.
+  `sandbox:` field in tool results now says wsl / on / off / unavailable.
+  Editor runs stay unsandboxed; Linux bwrap path untouched.
 - **Sysmon (2026-10-15):** `/api/sysmon` + background sampler (2s, pure stdlib
   — no psutil) in main.py; `SysMonitor.jsx` renders 2x2 SEGMENTED meters (10 fixed-px
   blocks between [ ], ghost blocks when idle; G/M/D/C, colors from the
@@ -289,8 +319,9 @@ wipes everything) · /clear (current chat messages only, chat + settings kept) �
 
 - In-chat allow/disallow popup for out-of-bounds ops (pausable agentic loop)
 - /mkdir scaffolding contents · history-stripping of superseded artifacts ·
-  preview scroll/slide-state preservation · WSL execution backend toggle ·
-  frameless chrome revisit · real .pptx path (python-pptx)
+  preview scroll/slide-state preservation · frameless chrome revisit ·
+  real .pptx path (python-pptx) — (WSL execution backend toggle: DONE — shipped
+  2026-10-16, see the "WSL sandbox backend" bullet under Platform notes)
 
 ## Arch/Linux fresh-machine setup (learned 2026-10-13)
 

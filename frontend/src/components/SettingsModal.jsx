@@ -107,7 +107,7 @@ function ModelSelect({ label, value, onChange, models }) {
   )
 }
 
-export default function SettingsModal({ status, conversation, accent, sandboxTools, model, models, loadout, view, onViewChange, bgBrightness, bgContrast, engine, engineVulkan, workspace, defaultSystemPrompt, defaultSystemPromptCasual, mode, onSave, onClose, onOpenModels, onServerChanged }) {
+export default function SettingsModal({ status, conversation, accent, sandboxTools, sandboxBackend, model, models, loadout, view, onViewChange, bgBrightness, bgContrast, engine, engineVulkan, workspace, defaultSystemPrompt, defaultSystemPromptCasual, mode, onSave, onClose, onOpenModels, onServerChanged }) {
   const [ollamaUrl, setOllamaUrl] = useState(status?.url || 'http://localhost:11434')
   // Show the EFFECTIVE prompt: per-chat override when set, else the mode's
   // default (build = sysp.txt; casual = its own default, empty out of the
@@ -121,6 +121,7 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
   const [ctxText, setCtxText] = useState(conversation?.context_length ? String(conversation.context_length) : '')
   const [selectedAccent, setSelectedAccent] = useState(accent || DEFAULT_ACCENT)
   const [sandboxOn, setSandboxOn] = useState(sandboxTools !== false)
+  const [backendSel, setBackendSel] = useState(['auto', 'wsl', 'off'].includes(sandboxBackend) ? sandboxBackend : 'auto')
   const [casualModel, setCasualModel] = useState(loadout?.casualModel || '')
   const [codeModel, setCodeModel] = useState(loadout?.codeModel || '')
   const [casualCtxText, setCasualCtxText] = useState(loadout?.casualCtx ? String(loadout.casualCtx) : '')
@@ -222,6 +223,7 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
       contextLength: parseCtxText(ctxText),
       accent: selectedAccent,
       sandboxTools: sandboxOn,
+      sandboxBackend: backendSel,
       loadoutCasualThink: casualThink,
       loadoutCasualModel: casualModel,
       loadoutCodeModel: codeModel,
@@ -268,7 +270,7 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
         .catch(() => setSaveState('error'))
     }, 500)
     return () => clearTimeout(t)
-  }, [ollamaUrl, systemPrompt, temperature, ctxText, selectedAccent, sandboxOn, casualModel, codeModel, casualCtxText, codeCtxText, casualThink, bgB, bgC, engineSel, vulkanOn])
+  }, [ollamaUrl, systemPrompt, temperature, ctxText, selectedAccent, sandboxOn, backendSel, casualModel, codeModel, casualCtxText, codeCtxText, casualThink, bgB, bgC, engineSel, vulkanOn])
   // flush-on-unmount: fire-and-forget, no setState (we're unmounting)
   useEffect(
     () => () => {
@@ -499,7 +501,20 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
             checked={sandboxOn}
             onChange={(e) => { setSandboxOn(e.target.checked); commitNow({ sandboxTools: e.target.checked }) }}
           />
-          <span>Sandbox model-run code (no network, isolated filesystem — Linux only)</span>
+          <span>Sandbox model-run code (no network, isolated filesystem — Linux: bubblewrap — Windows: WSL)</span>
+        </label>
+        <label className="sandbox-row">
+          <span>Sandbox backend (Windows):</span>
+          <select
+            className="modal-select"
+            value={backendSel}
+            disabled={!sandboxOn}
+            onChange={(e) => { setBackendSel(e.target.value); commitNow({ sandboxBackend: e.target.value }) }}
+          >
+            <option value="auto">auto — WSL when available, else unsandboxed</option>
+            <option value="wsl">WSL — require the WSL sandbox</option>
+            <option value="off">off — always unsandboxed</option>
+          </select>
         </label>
         <label>
           <span>Workspace root (build mode files live here — model cannot leave it)</span>

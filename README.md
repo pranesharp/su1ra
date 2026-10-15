@@ -76,8 +76,31 @@ React + Vite frontend  →  FastAPI backend (:8000)  →  your Ollama server
 *The least taxing for the best output for MY device (running on an arrow lake no dgpu) was on gemma4 : e4b and e2b And qwen3.5 4b*
 *If you can afford it, I'm pretty sure Qwen 3.8 would work the best*  
 
-*For a lower spec device I'd suggest you use a separate general tool call and chat model like gemma4 : e4b / e2b, and for coding specifically you could use qwen 3.5 4b (gemma4 can do weaker levels of codes as well, if its a simple code or so, and maybe you could build ON to the same code with qwen.) For lower end hardware, I suggest you turn off thinking for gemma and KEEP THINKING ON FOR QWEN.* 
+*For a lower spec device I'd suggest you use a separate general tool call and chat model like gemma4 : e4b / e2b, and for coding specifically you could use qwen 3.5 4b (gemma4 can do weaker levels of codes as well, if its a simple code or so, and maybe you could build ON to the same code with qwen.) For lower end hardware, I suggest you turn off thinking for gemma and KEEP THINKING ON FOR QWEN.*
 
+### WSL (Windows only — sandboxed build-mode runs)
+
+Build-mode Python runs inside a real sandbox: **bubblewrap** on Linux, and on Windows **WSL + bubblewrap** (a locked-down Linux distro — no network, no access to the rest of your drives, file access only inside your project folder). This is what keeps model-written code from touching your machine.
+
+You need WSL **only if**: you're on Windows **and** you use build mode's Python/file tools. Casual chat never needs it.
+
+You'll know it's missing: the first sandboxed tool run in build mode prints an `unavailable` note with the exact install command right in the chat, and `/settings` has a **Sandbox backend** picker (auto / WSL / off).
+
+One-time setup (~5 min):
+
+```powershell
+# 1. Install WSL + a default distro (admin prompt; Windows restart required)
+wsl --install
+
+# 2. Install the two packages Su1ra needs inside the distro (no password needed)
+#    Ubuntu / Debian (default after wsl --install):
+wsl -d Ubuntu -u root -e sh -c "apt-get update && apt-get install -y python3 bubblewrap"
+#    Arch (ArchWSL from the Store):
+wsl -d archlinux -u root -e sh -c "pacman -Syu --needed --noconfirm python bubblewrap"
+#    (any other distro: just install "python3" + "bubblewrap" with its package manager)
+```
+
+That's it — Su1ra detects the distro automatically. Without WSL, build-mode code still runs but **unsandboxed** (the tool result tells you, loudly). Keep the default `auto` backend: it uses WSL when available and only falls back when it isn't.
 
 ## Install
 

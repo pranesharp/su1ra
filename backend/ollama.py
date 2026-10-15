@@ -9,6 +9,7 @@ from pathlib import Path
 
 import httpx
 
+import runner
 from store import get_setting
 
 DEFAULT_URL = "http://localhost:11434"
@@ -46,7 +47,10 @@ def engine_env():
 
 def _run_capture(cmd, timeout=8):
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        # Windowed parent, console children: without CREATE_NO_WINDOW each probe
+        # (nvidia-smi, powershell, ...) would flash a terminal window.
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout,
+                              **runner.child_spawn_kwargs())
         if proc.returncode == 0:
             return proc.stdout.decode(errors="replace")
     except Exception:

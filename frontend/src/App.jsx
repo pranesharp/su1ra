@@ -115,6 +115,7 @@ export default function App() {
   const [codeArmed, setCodeArmed] = useState(false)
   const [casualSysp, setCasualSysp] = useState('')
   const [sandboxTools, setSandboxTools] = useState(true)
+  const [sandboxBackend, setSandboxBackend] = useState('auto')
   const [loadout, setLoadout] = useState({ casualModel: '', codeModel: '', casualCtx: 0, codeCtx: 0, casualThink: 'off' })
   const [engine, setEngine] = useState('auto')
   const [engineVulkan, setEngineVulkan] = useState(false)
@@ -455,6 +456,7 @@ export default function App() {
       setEditorOpen(settingsRes.ide_open === true)
       setEditorWidth(typeof settingsRes.ide_width === 'number' ? settingsRes.ide_width : 460)
       setSandboxTools(settingsRes.sandbox_tools !== false)
+      setSandboxBackend(['auto', 'wsl', 'off'].includes(settingsRes.sandbox_backend) ? settingsRes.sandbox_backend : 'auto')
       setWorkspace({ root: settingsRes.workspace_root || '', project: settingsRes.active_project || '' })
       setModels(modelsRes.models)
       setConversations(convsRes.conversations)
@@ -1491,7 +1493,7 @@ export default function App() {
     window.addEventListener('mouseup', onUp)
   }
 
-  async function saveSettings({ ollamaUrl, systemPrompt, systemPromptScope, temperature, contextLength, accent: newAccent, sandboxTools: sandboxPref, loadoutCasualModel, loadoutCodeModel, loadoutCasualCtx, loadoutCodeCtx, loadoutCasualThink, bgBrightness: newBrightness, bgContrast: newContrast, engine: newEngine, engineVulkan: vulkanPref, workspaceRoot, activeProject }) {
+  async function saveSettings({ ollamaUrl, systemPrompt, systemPromptScope, temperature, contextLength, accent: newAccent, sandboxTools: sandboxPref, sandboxBackend: sandboxBackendPref, loadoutCasualModel, loadoutCodeModel, loadoutCasualCtx, loadoutCodeCtx, loadoutCasualThink, bgBrightness: newBrightness, bgContrast: newContrast, engine: newEngine, engineVulkan: vulkanPref, workspaceRoot, activeProject }) {
     // Autosaved on every change (no Save button) — stay open, skip invalid
     // mid-typing values instead of failing the whole patch.
     const url = (ollamaUrl || '').trim()
@@ -1511,6 +1513,7 @@ export default function App() {
       ...(urlOk ? { ollama_url: url } : {}),
       accent: newAccent,
       ...(sandboxPref === undefined ? {} : { sandbox_tools: sandboxPref }),
+      ...(sandboxBackendPref === undefined ? {} : { sandbox_backend: sandboxBackendPref }),
       ...(spToDefault ? { [codeArmed ? 'default_system_prompt' : 'default_system_prompt_casual']: systemPrompt } : {}),
       ...(tempOk ? { default_temperature: temperature } : {}),
       default_context_length: newDefaultCtx,
@@ -1532,6 +1535,7 @@ export default function App() {
     }
     if (newEngine !== undefined) setEngine(newEngine)
     if (vulkanPref !== undefined) setEngineVulkan(vulkanPref)
+    if (sandboxBackendPref !== undefined) setSandboxBackend(sandboxBackendPref)
     if (loadoutCasualModel !== undefined || loadoutCodeModel !== undefined || loadoutCasualCtx !== undefined || loadoutCodeCtx !== undefined || loadoutCasualThink !== undefined) {
       setLoadout((l) => ({
         casualModel: loadoutCasualModel !== undefined ? loadoutCasualModel : l.casualModel,
@@ -1674,6 +1678,7 @@ export default function App() {
             onServerChanged={refreshStatus}
             accent={accent}
             sandboxTools={sandboxTools}
+            sandboxBackend={sandboxBackend}
             workspace={workspace}
             defaultSystemPrompt={chatDefaultsRef.current.system_prompt || ''}
             defaultSystemPromptCasual={casualSysp}
