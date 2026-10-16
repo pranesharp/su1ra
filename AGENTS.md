@@ -119,14 +119,25 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
   browser mode): URL bar, back/fwd/refresh, engine picker (default Bing), badge
   (`✓ html` / `✗ js` / `✗ blocked`), `[ open externally ]`, `[ summarize page ]`.
   No search API/scraping — all of that was deleted.
-- **Link clicks → pane (GTK):** result links are `target="_blank"`. pywebview's own
-  `decide-policy` handler (`gtk.py` `on_navigation`) runs first and would
-  `load_url` the main webview (replacing the app). `desktop.py`
-  `_install_new_window_handler` DISCONNECTS it (`disconnect_by_func`) and installs
-  one wrapper: `_blank` → `window.__su1raOpenInPane(url)` + `decision.ignore()`;
-  everything else delegated to pywebview's `on_navigation`. Install-once guard
-  (`wv._su1ra_pane_nav`) — `events.loaded` fires for splash AND app. Iframe sandbox
-  MUST keep `allow-popups` (it carries the URL; without it WebKit sends about:blank).
+- **Link clicks → pane (GTK + Windows):** result links are `target="_blank"`.
+  GTK: pywebview's own `decide-policy` handler (`gtk.py` `on_navigation`) runs
+  first and would `load_url` the main webview (replacing the app). `desktop.py`
+  `_install_new_window_handler` DISCONNECTS it (`disconnect_by_func`) and
+  installs one wrapper: `_blank` → `window.__su1raOpenInPane(url)` +
+  `decision.ignore()`; everything else delegated to pywebview's `on_navigation`.
+  Install-once guard (`wv._su1ra_pane_nav`) — `events.loaded` fires for splash
+  AND app. **Windows (2026-10-16):** the same bug persisted on the WinForms/
+  EdgeChromium backend (user hit it on the Windows boot) — pywebview's
+  `EdgeChrome.on_new_window_request` calls `load_url` (sets WebView2 Source →
+  replaces app). Added `_install_new_window_handler_win()`: on `nt` the
+  dispatcher routes to it; it finds `winforms.BrowserView.instances` →
+  `EdgeChrome`, marshals onto the UI thread via `wv.Invoke(Action(...))` and
+  polls up to ~4s until the native `CoreWebView2` is ready (it's only reachable
+  on the UI thread, but `events.loaded` callbacks run on worker threads), then
+  detaches `NewWindowRequested` and attaches a handler that
+  `set_Handled(True)` + `ExecuteScriptAsync("…__su1raOpenInPane(…)")`.
+  Iframe sandbox MUST keep `allow-popups` (it carries the URL; without it WebKit
+  sends about:blank).
 - **Bing redirects:** results are `bing.com/ck/a?...&u=a1<base64url>`;
   `unwrapRedirect()` (App.jsx) decodes them in `browserNavigate` and
   `__su1raOpenInPane`, otherwise the backend fetches a JS stub → `✗ js`.
@@ -135,6 +146,16 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
   Frontend sends it via normal `send()` (creates chat + loads model). ChatView
   renders these messages as `// summarize page: <title>` (`PAGE_SUMMARY_RE`,
   display-only; full text stored/sent; no `[ edit ]`).
+  **Wrong-`?`/no-summarize on some pages (fixed 2026-10-16):** the badge +
+  summarize button are driven by the backend's own `page_info`/`fetch_page_text`
+  httpx probes. When a page bot-blocks the backend's egress IP (e.g. Wikipedia
+  returns 403 to a Cloudflare-WARP-routed Python egress, while the WebView2
+  iframe renders it fine on a different path) the probe yields `kind=binary`/
+  `unknown`, which used to fall through to a `?` badge + "checking page..." with
+  NO summarize button. Now: such pages show `✗ probe` + a "couldn't probe from
+  the backend" note and STILL offer `[ summarize page ]` (best-effort — 502s
+  with a clear message if genuinely unreachable). The iframe (real browser
+  stack) keeps powering the visible page regardless.
 - Known limits: in-iframe navigation isn't tracked (summarize uses the last
   pane-level URL); Google/Brave/DDG refuse framing.
 - **Pane divider drag:** `onPointerDown` (NOT onMouseDown — pointer capture needs a
@@ -351,23 +372,47 @@ wipes everything) · /clear (current chat messages only, chat + settings kept) �
   report/report/session-log.md close-out. This supersedes the "parked" note on
   the WSL task below.
 
-## NEXT SESSION STARTS HERE (2026-10-13 handoff)
+## NEXT SESSION STARTS HERE (2026-10-16 late handoff — web batch IMPLEMENTED, awaiting user click-through)
 
-- Machine state: venv built (.venv, pyinstaller incl.), UI built, engine installed via
-  the IN-APP flow (1.44 GB, spawns <app>/ollama/bin/ollama v0.40.3), desktop.py boots
-  clean (backend ready → ollama detected → ollama ready). Models present:
-  gemma4:e4b, deepseek-r1:1.5b (ornith-1.5:9b NOT in this machine's manifests —
-  re-pull via hub if needed). Arch setup gotchas in the section above (gi/.pth bridge).
-- Working tree: only frontend/yarn.lock modified (line endings from clone) — safe to
-  checkout. Nothing of ours is uncommitted except local-only files (AGENTS.md, report/).
-- Sandbox task (WSL-on-Windows) is WRITTEN UP AND PARKED on purpose:
-  report/report/sandbox-wsl-task.md — do not start it unless the user asks; they will
-  do it later with a different agent, possibly on the Windows boot.
+- **Read this FIRST for the /web work: `report/report/web-features-next.md`** (now
+  marked RESOLVED). All three open items are implemented in the working tree +
+  rebuilt dist (uncommitted until the user clicks through):
+  - **A. `[ capture ]` FIXED**: `desktop.py.capture_pane` now uses Pillow
+    `ImageGrab.grab()` + `GetClientRect`/`ClientToScreen` + virtual-screen scale
+    `f` on a WORKER thread (PrintWindow deleted — it yields a black bitmap). Pane
+    rect crop when the frontend ({x,y,w,h}; dpr ignored) is passed; else full
+    client area. Mechanics verified against a real window on the live desktop.
+  - **B. Casual "thinking" leak ROOT-CAUSED**: the casual loadout model
+    `abminicpm52b:latest` is a GGUF-only MiniCPM5-2b-abliterated import with a
+    bare `{{ .Prompt }}` template — **Ollama ignores `think:false` for it**
+    (verified live through `/api/chat`: identical ' thinking' preamble with
+    false/omitted/system-directive; reasoning arrives in the CONTENT channel,
+    not the `thinking` field). The frontend send path was NOT the bug (new
+    SU1RA_DEBUG log at main.py:1596 proves `body='off'` reaches the backend).
+    Fixes: `splitThinking(content, strictClose)` — final messages with an
+    unclosed ' thinking' opener render as content (no more whole reply swallowed
+    in a think block; chat 65 msg 496 peaked at 2610 chars of reasoning and ZERO
+    answer); streaming keeps the lenient rule. **No request-level lever stops
+    this model thinking — casual loadout should move to a qwen3-family model if
+    think-off must suppress reasoning.**
+  - **C. adblock** — backend re-verified via curl (blocklist injected into head);
+    `ab: on` click-through still pending.
+- Also DONE + user-confirmed this session: **EdgeChromium link-click fix** —
+  `desktop.py._install_new_window_handler_win()` (pane clicks no longer replace the
+  whole app on Windows; GTK path untouched). And the **WSL sandbox is COMPLETED + 
+  shipped** (committed `3300ce2`/`e5f0ed0`) — see `report/report/wsl-sandbox-done.md`.
+- Commit discipline (updated): the broken PrintWindow capture is gone — nothing
+  broken holds the commit. USER CONFIRMATION STILL REQUIRED by clicking through
+  the desktop app: [ capture ] → screenshot in chat, casual /web summarize with
+  think off, `ab: on` on a fetchable page. Then commit the batch.
+- Machine state: venv (.venv), UI rebuilt (vite build ok), bundled ollama boots
+  clean (0.40.1 — `/api/show` is POST in this version). Models actually on the
+  box NOW: ONLY `abminicpm52b:latest` (casual loadout) and `Qwen3.8-9b:latest`
+  (build loadout) — the qwen3.5/gemma/deepseek list below is STALE, those models
+  are gone. Backend httpx egress is Cloudflare-WARP-routed → Wikipedia 403s the
+  backend but the WebView2 iframe renders fine (probe-vs-render divergence).
 - Queued next (user's list, not started): v0.3.2 GitHub release + SHA256 checksums +
-  terminal-styled landing page wired to releases/latest; npm-vs-yarn decision (README
-  says yarn, package-lock.json tracked, npm absent on this Arch box — yarn used here);
-  user said "new bug reports coming" (their reporttest.md items are marked PAST — wait
-  for fresh reports).
+  terminal-styled landing page; npm-vs-yarn decision.
 - Browser pane bug (link clicks replacing the app) RESOLVED late 2026-10-13, plus
   follow-ups (Bing unwrap, compact summarize line, fresh-boot summarize 422, divider
   drag). Fresh-boot summarize + divider drag await user confirmation. See the

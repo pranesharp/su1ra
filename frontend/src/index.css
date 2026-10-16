@@ -1676,6 +1676,11 @@ button {
   color: var(--muted);
   background: var(--panel);
 }
+.browser-note-probe {
+  opacity: 0.85;
+  color: #e0a04a;
+  border-top: 1px dashed var(--border);
+}
 
 .browser-badge {
   flex-shrink: 0;

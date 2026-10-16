@@ -23,7 +23,7 @@ Living list — newest on top. Checked items move to `session-log.md` when built
 - [ ] History-stripping of superseded artifacts (context savings on long revision chains)
 - [ ] Preview slide/scroll-state preservation across reloads
 - [x] **WSL sandbox backend for Windows tool runs** — built + verified 2026-10-16.
-      Task doc: `sandbox-wsl-task.md` (all acceptance boxes ticked except the
+      Task doc: `wsl-sandbox-done.md` (all acceptance boxes ticked except the
       Linux regression run, which needs a Linux box). Decision of record stands:
       WSL2 + bubblewrap chosen over Windows-native options (AppContainer reads
       user files, Windows Sandbox is Pro-only, Docker = WSL underneath anyway).

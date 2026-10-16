@@ -1421,7 +1421,7 @@ endpoint 200 with cpu/ram/disk) passes.
 - report/AGENTS.md mirror re-synced after the version edits.
 - WSL sandbox clarification for the record: the v0.3.1 commit message says
   "sandbox for windows via WSL" but NO WSL code exists in the repo (grep clean
-  2026-10-15) — that item is the PARKED task report/report/sandbox-wsl-task.md.
+  2026-10-15) — that item is the PARKED task report/report/wsl-sandbox-done.md.
   Windows tool runs today are UNSANDBOXED (bwrap is Linux-only) with only
   runner caps + the loud "sandbox: unavailable" label. Don't repeat the claim
   in release notes.
@@ -1432,7 +1432,7 @@ endpoint 200 with cpu/ram/disk) passes.
   heavier; Job Objects ≠ isolation; Sandboxie driver burden; Docker = WSL
   underneath → WSL2 + bwrap wins), sandbox_backend setting, copy-into-distro-fs
   shape, probe chain, UTF-16 gotcha, scope guard (editor run button stays
-  unsandboxed), acceptance summary, machine status. sandbox-wsl-task.md got a
+  unsandboxed), acceptance summary, machine status. wsl-sandbox-done.md got a
   2026-10-15 probe update (WSL2+Arch present; python3/bwrap not installed yet).
 
 ## BUGFIX 2026-10-15 (Windows box): run_python relaunched Su1ra — second app window
@@ -1472,7 +1472,7 @@ endpoint 200 with cpu/ram/disk) passes.
 - Still open (out of scope, deliberately): `desktop.py` has no single-instance
   guard, so any accidental relaunch = two windows + a second :8000 backend. The
   fix removes the trigger; the belt-and-braces lock is a separate decision.
-- Unrelated to the parked WSL sandbox task (`sandbox-wsl-task.md`): that is about
+- Unrelated to the parked WSL sandbox task (`wsl-sandbox-done.md`): that is about
   CONTAINMENT of tool runs on Windows; this was about which interpreter runs them.
   Windows tool runs are still unsandboxed + loudly labelled.
 
@@ -1576,3 +1576,179 @@ endpoint 200 with cpu/ram/disk) passes.
   nothing in the repo depends on them). app.db sandbox_backend left at default
   auto. git tree has the same uncommitted working-tree changes as before plus
   sandbox/runner/main/App/SettingsModal/index.css edits and doc updates.
+
+## IMPLEMENTED 2026-10-16 (Windows): link-clicks-replace-app fix extended to EdgeChromium
+- User reported `/web` still replaces the whole app — on the WINDOWS boot (the
+  original 2026-10-13 fix was done on the Linux/GTK boot). Confirmed by code:
+  `_install_new_window_handler()` requires `import gi` (WebKitGTK) — it never
+  runs on Windows (`ModuleNotFoundError`), so Windows only had
+  `OPEN_EXTERNAL_LINKS_IN_BROWSER=False`. pywebview 6.2.1 on Windows uses the
+  winforms/EdgeChromium backend.
+- Root cause (pywebview `edgechromium.py:on_new_window_request`): with the
+  setting off it does `self.load_url(uri)` and `load_url` sets
+  `WebView2.Source` → the TOP-LEVEL webview navigates → whole app replaced. So
+  the "persists on Windows" was NOT the GTK fix regressing — the fix never
+  existed for Windows.
+- Desktop.py got `_install_new_window_handler_win()`; the dispatcher
+  `_install_new_window_handler()` now routes `os.name == 'nt'` to it and keeps
+  the GTK path otherwise. Working tree had desktop.py UNCHANGED since v0.3.2, and
+  the GTK fix is present/intact in both shipped v0.3.1/v0.3.2 installers → Linux
+  should still be fixed; a Windows-only live confirm is pending.
+- Mechanism: `winforms.BrowserView.instances` → `BrowserView.browser`
+  (`EdgeChrome`) → `webview` (`WebView2`). `CoreWebView2` is only reachable on
+  the UI thread, but `events.loaded` callbacks run on `threading.Thread`
+  workers (pywebview `event.py`), so the FIRST attempt at `wv.CoreWebView2` threw
+  "CoreWebView2 can only be accessed from the UI thread" / E_NOINTERFACE and
+  silently no-op'd (that's why the bug persisted even with the handler in place).
+  Fix: marshal the install onto the UI thread via `wv.Invoke(Action(...))` and
+  poll (up to ~4s) until the controller is ready, then detach
+  `edge.on_new_window_request` and attach ours which `set_Handled(True)` +
+  `ExecuteScriptAsync('window.__su1raOpenInPane(uri)')`.
+  (First iteration wrongly relied on a `CoreWebView2InitializationCompleted`
+  hook subscribed at `loaded` — that signal already fired during window creation,
+  before `loaded`, so it never re-armed.)
+- Verified: py_compile clean; pythonnet `+=`/`-=` bound-method detach/attach
+  works (tested against real System.Timers event); winforms/edgechromium import
+  on this box with renderer=edgechromium; the detach→attach→route logic passes a
+  faithful simulation (default handler replaced, JS injected, handled set);
+  `import gi` fails on nt confirming the WinForms route fires. NOT live-verified:
+  the install-once log line needs a fully-rendered interactive desktop session —
+  `events.loaded` (which drives the install) does not fire in a headless/
+  background shell (the JS bridge `_pywebviewready`→`loaded` handshake needs the
+  app page to render). Needs a user click-through on the Windows desktop, plus a
+  Linux click-through to confirm no GTK regression.
+
+## 2026-10-16: wiki "never blocked" mystery — backend egress behind Cloudflare WARP
+- User report: `/web` showed `?` + "checking page..." + NO summarize button on
+  Wikipedia, and "wiki is never blocked, why this time". Root cause is NOT code:
+  this box's Python/httpx egress is routed through Cloudflare WARP — `cf trace`
+  shows `ip=2a09:bac1:...` (WARP IPv6 range) and `api.ipify.org` gives
+  `104.28.225.167` (Cloudflare). Wikipedia 403s the WARP/datacenter egress for
+  EVERY endpoint/UA/PATH (article, Main Page, REST API `page/summary`, mobile
+  es, control example.com ✅ 200). WebView2 iframe renders wiki fine because the
+  browser stack takes a different network route → the divergence.
+- Why "a first": WARP routing (mode / point-of-presence) shifts — when the same
+  egress previously went over a non-flagged path the backend summarize worked.
+  Also: backend summarize for an IP-403'd page was ALWAYS going to fail; it just
+  had never hit a Wikipedia-flagging WARP path before. This is environmental,
+  not a %gegression.
+- Fix (UX, still worthwhile): now such pages show `✗ probe` badge + a
+  "couldn't probe from the backend (unreachable/blocked) — iframe may still
+  render it" note, and STILL show `[ summarize page ]` (best-effort) instead of
+  a dead-end `?`/"checking page". Pressing it on a genuinely-blocked page
+  502s with the clear httpx message surfaced as a `// could not summarize`
+  chat line (App.jsx `pushSystem`). Iframes already power the visible page.
+- Files: `frontend/src/components/ArtifactPane.jsx` (state machine: `inconclusive`
+  = info present, not html/js/blocked → `✗ probe` + best-effort button),
+  `frontend/src/index.css` (`.browser-note-probe`). Backend unchanged.
+- Lesson for later: backend `httpx` fetch can NOT be trusted as the arbiter of a
+  page's summarize-ability when the machine egress is WARP/VPN/datacenter — the
+  iframe is the reliable render. A future "summarize from the pane's DOM" (option
+  C, parked) is the only way to summarize WARP-blocked origins.
+
+## 2026-10-16: pane adblocker + page screenshot-to-vision + summarize fallback
+- **Adblocker (pane-only):** `/api/page/view?url=` rewrite proxy added in main.py.
+  Existing sandboxed cross-origin iframe could never be adblocked from the parent
+  (can't touch its DOM), so the pane loads through the proxy when `ab` toggle is
+  on: it fetchs the page server-side, injects `AD_BLOCK_CSS` (a consent/DFP/ad-tag
+  selector list) into `<head>`, strips the worst ad scripts/iframes & empty ad divs
+  (`_strip_ad_dom`), and serves the cleaned HTML. Verified live against
+  example.com (200, blocklist injected). Caveat: uses the backend httpx egress →
+  same WARP/403 limit as summarize on Wikipedia-adjacent pages; adblock shows
+  "on" but the iframe falls back when fetch fails. Frontend `ab: on/off` toggle in
+  the pane bar; `frameSrc = /api/page/view?url=…` when on.
+- **Page screenshot → vision:** `Su1raBridge.capture_pane()` added in desktop.py
+  (Windows/EdgeChromium best-effort via `CoreWebView2.CapturePreview` → WIC
+  MemoryStream → base64 PNG; returns '' when unavailable/GTK). Frontend: `[ capture ]`
+  button in the pane bar calls it; `summarizePage({captured})` in App.jsx base64→
+  File→`api.uploadAttachment`→staged as `extraAttachments` (new `send` opts
+  option) + sends "This is a screenshot of the current browser page…" to the
+  vision model. `send()` grew `opts.extraAttachments` so an upload can ride the
+  same message without touching the pending-attachments queue.
+- **Not yet live-verified (needs user's desktop, same as the EdgeChromium nav
+  handler):** the actual `CapturePreview` call (interop, UI thread) and the full
+  capture→vision round-trip. The adblock proxy IS verified via curl.
+- Note: `_store_attachment` was accidentally deleted during the edit and restored
+  verbatim from git (upload_attachment / from-path intact). Verified: no dups.
+
+## 2026-10-16: capture screenshot CRASHED app — root cause + async redesign
+- User hit `[ capture ]` (new pane-screenshot button) → app froze/crashed ("no
+  response"). Root cause: first `Su1raBridge.capture_pane()` called
+  `CoreWebView2.CapturePreview(Png, stream)` + `time.sleep(0.2)` + a synchronous
+  `stream.Read` DIRECTLY on the pywebview js_api bridge thread. But js_api methods
+  run on the UI thread, and `CoreWebView2.CapturePreview` is ASYNC with its
+  completion handler ALSO on the UI thread — so blocking the UI thread in
+  time.sleep prevented the completion from ever running → deadlock/freeze. (Same
+  class of bug AGENTS.md already warns about: never block the UI thread.)
+- Fix (desktop.py `capture_pane`): can't await UI-thread completion from a
+  UI-thread bridge. Redesigned to fire-and-forget: start a WORKER thread to issue
+  `CapturePreview` (marshaled to the UI thread via wv.Invoke), wait on semaphores,
+  read the PNG via a pythonnet `ICoreWebView2CapturePreviewCompletedHandler`
+  (Invoke runs on UI thread), then push the base64 to the frontend via
+  `window.evaluate_js("window.__su1raCaptureResult(...)")`. The bridge method
+  RETURNS IMMEDIATELY — no blocking, no freezes.
+- Frontend (ArtifactPane.jsx capturePage): registers `window.__su1raCaptureResult`
+  callback + calls `capture_pane()` fire-and-forget; shows `[ snap... ]` until the
+  callback or an 8s timeout. Removed the `finally { setCapturing(false) }` that
+  would've killed the spinner before the async result arrived.
+- Still user-verify: whether `ICoreWebView2CapturePreviewCompletedHandler` imports
+  + `CapturePreview` produces a real PNG through this interop on the Windows box.
+  If it 8s-timeouts, capture degrades gracefully (no crash) — the interop is the
+  only open question. Backend + frontend both compile/build.
+
+## 2026-10-16 (late): web batch IMPLEMENTED — ImageGrab capture, casual-think root cause, adblock re-verify
+- Continued from the handoff doc `report/report/web-features-next.md` (now marked
+  RESOLVED). All uncommitted; user click-through pending before the batch commit.
+- **A. Screenshot — PrintWindow deleted, ImageGrab shipped.** `desktop.py.capture_pane`
+  now: worker thread → `PIL.ImageGrab.grab()` (full virtual screen) → crop to the
+  WinForms CLIENT area via `GetClientRect` + `ClientToScreen` + virtual-screen
+  metrics, scaled by `f = shot.width / gsm(SM_CXVIRTUALSCREEN)` (logical→physical;
+  primary-screen fallback). Pane rect from the frontend ({x,y,w,h} CSS px; dpr
+  now IGNORED — the measured f is the real scale) crops further, clamped inside
+  the client box; without it the full client area is delivered. PNG → base64 →
+  `window.evaluate_js("window.__su1raCaptureResult(...)")` from the worker (never
+  the UI thread). PowerShell subprocess + tempfile paths removed. Mechanics
+  verified on the live desktop against a real window: grab 1920x1200, client box
+  (1,31,785,1167) inside grab, pane crop 600x400, valid PNG. `pillow>=10.0.0`
+  added to `backend/requirements.txt` (PIL already in `su1ra.spec` hiddenimports).
+- **B. Casual "thinking" leak — ROOT CAUSE PROVEN (model, not the app).** Live
+  reproduction through the app's own `/api/chat` route (`SU1RA_DEBUG=1` backend,
+  fresh casual conv, `think:'off'`):
+  - The log line (`main.py:1596`, `model_supports_think`, cached `/api/show`
+    template probe in ollama.py): `model=abminicpm52b:latest think='off'
+    (body='off' conv=None) code_mode=False think-toggle-supported=False` — the
+    request DOES carry think false; suspects 1–2 (stale send path / legacy
+    default_think) are REFUTED.
+  - `abminicpm52b:latest` = `minicpm5-2b-abliterated-IQ4_XS.gguf` (1.42 GB
+    GGUF-only import). `/api/show` (POST in ollama 0.40.1): template `{{ .Prompt }}`,
+    capabilities `['completion']` — NO `{{ if .Think }}` construct, so Ollama
+    ignores the think param. Verified live: identical ' thinking' preamble with
+    `think:false`, with the field omitted, and with a system directive begging it
+    not to reason. The preamble arrives in the CONTENT channel (not the
+    `thinking` field), so stream_chat's field detection never collapses it; the
+    earlier user session (chat 65 msg 496) degenerated — 2610 chars of reasoning,
+    NO answer (ends "...Couple, Couple, Couple").
+  - Fixes: (i) `ChatView.splitThinking(content, strictClose)` — a FINAL message
+    whose ' thinking' opener has no ' response' closer renders as content (the
+    model really wrote it; the answer is no longer swallowed inside an unclosed
+    think block). Streaming keeps the lenient rule (no raw-thought flashing);
+    properly closed think blocks stay collapsed; App.jsx:1256 artifact extraction
+    uses strictClose too. 7-case node harness verified. (ii) The debug log itself
+    (per the handoff's concrete step): think resolution + `think-toggle-supported`
+    verdict with a warning when think-off can't be honored.
+  - **No request-level lever stops this model thinking.** User-visible options:
+    switch the casual loadout model to a qwen3-family one (honors the toggle;
+    reasoning lands in the collapsible field), or keep MiniCPM and accept the
+    preamble as part of its output (now visible rather than hidden).
+- **C. Adblock** — `/api/page/view` re-verified via curl (200; blocklist `<style>`
+  injected in `<head>`). In-app `ab: on` click-through still pending (uses the
+  backend httpx egress → WARP/403 caveat unchanged).
+- Model inventory correction: the box now has ONLY `abminicpm52b:latest` +
+  `Qwen3.8-9b:latest` (`manifests-v2/ollama.com/library/`); the earlier
+  qwen3.5:0.8b / gemma4:e4b / deepseek-r1:1.5b list was stale. Ollama 0.40.1.
+- Frontend rebuilt (vite build ok, 4.0s). Test conversation 67 created during the
+  e2e was deleted via the API; test temp files removed.
+- NEXT for the user: click through the desktop app — [ capture ] →
+  screenshot lands in chat as an image; casual /web summarize with think off
+  (the ' thinking' preamble now renders as visible content, not a dead think
+  block); `ab: on` on a fetchable page. Then commit the batch.

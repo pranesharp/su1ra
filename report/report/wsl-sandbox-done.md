@@ -1,6 +1,12 @@
-# Task: WSL-backed sandbox for Windows tool runs
+# WSL sandbox for Windows tool runs — COMPLETED (resolved 2026-10-16)
 
-Status: IMPLEMENTED + VERIFIED (2026-10-16, Windows box). Repo code landed:
+> **MOVED/COMPLETED.** This task is DONE (code shipped, e2e-verified, committed +
+> pushed in `3300ce2`/`e5f0ed0`). This file is now the decision-of-record archive.
+> The ACTIVE open work (the `/web` pane: screenshot `[ capture ]` crash + casual
+> think leak + adblock confirm) is in **`web-features-next.md`** in this folder —
+> **point the next agent there first.**
+
+Status: **IMPLEMENTED + VERIFIED (2026-10-16, Windows box).** Repo code landed:
 `backend/sandbox.py` `wsl_probe()`/`wsl_wrap()`/`win_to_wsl()`, `runner.run_python`
 `backend=` param with a stdin-fed WSL branch, `backend/main.py` `sandbox_backend`
 setting (auto|wsl|off) + boot warm probe, SettingsModal backend select. Harness
@@ -9,26 +15,26 @@ e2e later with qwen3.5:0.8b (tool block showed uid 65534 / cwd /work / no /mnt /
 net blocked / [exit 0]; write-back landed in the active project on Windows).
 Acceptance checklist below ticked. Unproven: frozen exe + Linux regression run
 only. Full account in `session-log.md` (2026-10-16 close-out).
-Update 2026-10-15 (Windows boot probe): WSL2 + Arch distro ARE present; python3
-and bwrap are NOT installed in the distro (`sudo pacman -S python bwrap` prepares
-the box). Plan of record expanded in fplan.md "v2 ideas" — option sweep done
-(AppContainer reads user files, Windows Sandbox is Pro-only + API-less, Docker =
-WSL underneath → WSL2 + bwrap chosen). wsl.exe gotcha learned live: stdout is
-UTF-16, strip nulls when parsing.
-Update 2026-10-16 (discussion + probes, Windows box): READ THIS FIRST —
-`sandbox-wsl-plan-update.md` in this folder. It fixes two bugs in the plan
-below (the `wsl -e which bwrap` probe in "Design to implement" fails on Arch —
-`which` isn't installed; and `find_bwrap()` gates on Linux so `wrap()` argv as
-written CANNOT be passed straight to wsl.exe), resolves the plan's
-option-(a)/(b) evaluation with live probes (drvfs /mnt/c IS mounted, so the
-"home never mounted" framing only holds with the explicit tmpfs; distro has
-tar but lacks python3+bwrap; systemd=true), and puts 5 decision points (image
-shape, project I/O, first-run UX, cold-boot vs 30s cap, scope) in front of the
-user before implementation. No code written yet.
 
-Update 2026-10-16 (later): HANDOFF WRITTEN — `wsl-sandbox-handoff.md`. Distro
-now has python+bwrap; a hand-built wsl.exe→bwrap run was PROVEN end-to-end
-(net blocked, no /mnt, workdir bind read/write OK). Code not yet written.
+## Timeline (historical, kept for the record)
+
+- **2026-10-15 (Windows boot probe):** WSL2 + Arch distro ARE present; python3 and
+  bwrap were NOT installed in the distro (`sudo pacman -S python bwrap` prepares
+  the box). Plan expanded in `fplan.md` "v2 ideas" — option sweep done
+  (AppContainer reads user files, Windows Sandbox is Pro-only + API-less,
+  Docker = WSL underneath → WSL2 + bwrap chosen). gotcha learned live: wsl.exe
+  stdout is UTF-16, strip nulls when parsing.
+- **2026-10-16 (discussion + probes):** `sandbox-wsl-plan-update.md` — fixed two
+  bugs in the plan below (`wsl -e which bwrap` fails on Arch — `which` missing;
+  `find_bwrap()` gates on Linux so `wrap()` argv can't pass straight to wsl.exe),
+  resolved option-(a)/(b) with live probes, listed 5 decision points. No code yet.
+- **2026-10-16 (later handoff):** `wsl-sandbox-handoff.md` — distro got python+bwrap;
+  a hand-built wsl.exe→bwrap run proven end-to-end (net blocked, no /mnt,
+  workdir bind read/write OK). Code not yet written.
+- **2026-10-16 (implementation + shipping):** all code landed, harness 14/14 +
+  7/7 failpaths, live settings round-trip, in-app e2e with qwen3.5:0.8b. Committed
+  + pushed (`3300ce2`, `e5f0ed0`). Details in `session-log.md` close-out.
+
 
 ## Why
 

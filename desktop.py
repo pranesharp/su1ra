@@ -215,7 +215,6 @@ accent = su1ra_store.get_setting("accent") or "#bf264a"
 class NativeDrop:
     """JS bridge: the frontend calls takePaths() on drop to collect any file
     paths pywebview's GTK backend captured from the native drag."""
-
     def takePaths(self):
         try:
             from webview.dom import _dnd_state
@@ -230,8 +229,107 @@ class NativeDrop:
 class Su1raBridge(NativeDrop):
     """Single js_api object exposed to the frontend (pywebview takes one).
 
-    Currently just the Wayland drag & drop bridge (see NativeDrop).
+    `capture_pane` is added on Windows where EdgeChromium can snapshot the
+    WebView2 surface; on GTK it degrades (returns None) until a GTK capture is
+    wired in.
     """
+
+    def capture_pane(self, rect=None):
+        """Screenshot the pane (best-effort): result is pushed to the frontend
+        via window.__su1raCaptureResult(b64png); '' returns immediately.
+
+        Two prior attempts used WebView2's pythonnet CapturePreview — both froze
+        the UI thread (its completion handler needs the very thread the js_api
+        bridge runs on). A third tried PowerShell's PrintWindow — it returned a
+        BLACK bitmap on this box (not a valid capture of the GPU-composited
+        surface). This version touches NOTHING on the UI thread: a worker
+        thread takes a full-screen Pillow ImageGrab and crops it to the app
+        window's CLIENT area, then to the pane rect if the frontend sent one.
+
+        `rect`: {x, y, w, h} — iframe position/size in viewport CSS px, from the
+        frontend. Without it we deliver the full client-area shot.
+        """
+        try:
+            from webview.platforms.winforms import BrowserView
+            browser = BrowserView.instances.get(window.uid)
+            if browser is None and BrowserView.instances:
+                browser = next(iter(BrowserView.instances.values()))
+            # BrowserView IS the WinForms form; its client area == the webview.
+            hwnd = int(browser.Handle.ToInt64())
+        except Exception as exc:
+            print(f"[su1ra] capture_pane: window lookup failed: {exc}", flush=True)
+            return ""
+        if not hwnd:
+            return ""
+
+        import base64 as _b64
+        import ctypes
+        import ctypes.wintypes as _wt
+        import io
+        import threading
+
+        def _worker():
+            try:
+                from PIL import ImageGrab
+                user32 = ctypes.windll.user32
+                shot = ImageGrab.grab()  # full virtual screen, physical px
+                # Map the WinForms client area onto the grab. The form runs
+                # DPI-virtualized (logical px) while the grab is physical — f
+                # re-introduces the real scale (single + multi-monitor safe via
+                # the virtual-screen metrics).
+                gsm = user32.GetSystemMetrics
+                vx, vy, vw, vh = gsm(76), gsm(77), gsm(78), gsm(79)  # SM_X/CXVIRTUALSCREEN...
+                if not vw or not vh:
+                    vx, vy, vw, vh = 0, 0, gsm(0), gsm(1)  # primary-only fallback
+                f = shot.width / vw if vw else 1.0
+                rc = _wt.RECT()
+                user32.GetClientRect(hwnd, ctypes.byref(rc))
+                pt = _wt.POINT(0, 0)
+                user32.ClientToScreen(hwnd, ctypes.byref(pt))
+                cx, cy = int((pt.x - vx) * f), int((pt.y - vy) * f)
+                cw, ch = int(rc.right * f), int(rc.bottom * f)
+                data = None
+                try:
+                    # Pane rect: viewport CSS px == client logical px (zoom 100%),
+                    # scaled to the grab by f. dpr from the frontend is redundant
+                    # with the measured f and is ignored.
+                    if isinstance(rect, dict) and float(rect.get("w") or 0) > 24 and float(rect.get("h") or 0) > 24:
+                        rx = int(float(rect["x"]) * f)
+                        ry = int(float(rect["y"]) * f)
+                        x0 = max(cx, min(cx + cw, cx + rx))
+                        y0 = max(cy, min(cy + ch, cy + ry))
+                        x1 = max(cx, min(cx + cw, cx + rx + int(float(rect["w"]) * f)))
+                        y1 = max(cy, min(cy + ch, cy + ry + int(float(rect["h"]) * f)))
+                        if x1 - x0 >= 24 and y1 - y0 >= 24:
+                            shot = shot.crop((x0, y0, x1, y1))
+                        else:
+                            shot = shot.crop((cx, cy, cx + cw, cy + ch))
+                    else:
+                        shot = shot.crop((cx, cy, cx + cw, cy + ch))
+                except Exception as exc:
+                    print(f"[su1ra] capture_pane: pane crop failed ({exc}); using client area", flush=True)
+                    try:
+                        shot = shot.crop((cx, cy, cx + cw, cy + ch))
+                    except Exception:
+                        pass
+                buf = io.BytesIO()
+                shot.convert("RGB").save(buf, format="PNG")
+                data = buf.getvalue()
+                if not data or data[:4] != b"\x89PNG":
+                    print("[su1ra] capture_pane: grab produced no PNG", flush=True)
+                    return
+                b64 = _b64.b64encode(data).decode("ascii")
+                # Push to the frontend from this WORKER thread — window.evaluate_js
+                # marshals to the UI thread itself; we must never block the UI loop.
+                window.evaluate_js(
+                    "window.__su1raCaptureResult && window.__su1raCaptureResult(%s)"
+                    % _js_str(b64)
+                )
+            except Exception as exc:
+                print(f"[su1ra] capture_pane: grab failed: {exc}", flush=True)
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return ""  # result arrives asynchronously via __su1raCaptureResult
 
 
 window = webview.create_window(
@@ -263,20 +361,149 @@ def _js_str(s):
     return json.dumps(str(s))
 
 
+_WIN_PANE_NAV_INSTALLED = False
+
+
+def _install_new_window_handler_win():
+    """Windows (EdgeChromium/WebView2) mirror of the GTK handler.
+
+    pywebview's EdgeChromium backend handles `target="_blank"` in
+    `EdgeChrome.on_new_window_request` (edgechromium.py): it marks the request
+    handled and calls `load_url(uri)` — which sets `CoreWebView2.Source` on the
+    TOP-LEVEL webview, replacing the whole app with the page. We detach that
+    handler and route the URL into the browser pane via the same
+    `window.__su1raOpenInPane(...)` hook the GTK fix uses.
+
+    Notes on the WinForms backend:
+    - `winforms.BrowserView.instances` holds `{uid: BrowserView}` and
+      `BrowserView.browser` is the `EdgeChrome` instance;
+      `EdgeChrome.webview` is the WinForms `WebView2`.
+    - `CoreWebView2` is ONLY safely reachable on the UI thread, and only once
+      WebView2 has finished initialising. `events.loaded` fires from the
+      JS-bridge thread (non-UI), so we marshal onto the UI thread via
+      `wv.Invoke(...)` and poll (briefly) until the controller is ready, then
+      detach pywebview's `NewWindowRequested` handler and attach ours.
+    """
+    global _WIN_PANE_NAV_INSTALLED
+    if _WIN_PANE_NAV_INSTALLED:
+        return
+    try:
+        from webview.platforms.winforms import BrowserView
+    except Exception as exc:
+        print(f"[su1ra] winforms backend unavailable: {exc}", flush=True)
+        return
+
+    def _handled(browser, _sender, args):
+        # args.get_Uri() → the target="_blank" destination.
+        # NewWindowRequested fires on the UI thread, so ExecuteScriptAsync is safe
+        # to call directly.
+        try:
+            args.set_Handled(True)
+            uri = str(args.get_Uri())
+            if uri:
+                wv = getattr(browser, "webview", None)
+                if wv is not None:  # Async, best-effort: route into the pane.
+                    script = (
+                        "window.__su1raOpenInPane && window.__su1raOpenInPane(%s)"
+                        % _js_str(uri)
+                    )
+                    wv.ExecuteScriptAsync(script)
+        except Exception as exc:
+            print(f"[su1ra] pane nav failed: {exc}", flush=True)
+
+    def _install_locked():
+        # MUST run on the UI thread. Detaches pywebview's default (which does
+        # load_url → replaces app) and attaches ours.
+        browser = BrowserView.instances.get(window.uid)
+        if browser is None and BrowserView.instances:
+            browser = next(iter(BrowserView.instances.values()))
+        edge = getattr(browser, "browser", None)
+        wv = getattr(edge, "webview", None)
+        if not wv or getattr(wv, "_su1ra_pane_nav", False):
+            return False
+        try:
+            core = wv.CoreWebView2
+        except Exception:
+            return False  # not ready yet — caller retries
+        if core is None:
+            return False
+        try:  # drop pywebview's default NewWindowRequested (load_url → replaces app)
+            core.NewWindowRequested -= edge.on_new_window_request
+        except Exception as exc:
+            print(f"[su1ra] could not detach edge new-window handler: {exc}", flush=True)
+        try:
+            # Attach a bound method: pythonnet requires self as first arg.
+            core.NewWindowRequested += _handled.__get__(edge, type(edge))
+        except Exception as exc:
+            print(f"[su1ra] could not attach edge new-window handler: {exc}", flush=True)
+            return False
+        wv._su1ra_pane_nav = True
+        _WIN_PANE_NAV_INSTALLED = True
+        print("[su1ra] edge new-window handler installed", flush=True)
+        return True
+
+    def _on_ui_thread(action):
+        # Marshal `action` (a no-arg callable) onto the WinForms UI thread.
+        try:
+            wv.Invoke(_Action(action))  # noqa
+        except Exception as exc:
+            print(f"[su1ra] pane nav: could not marshal to UI thread: {exc}", flush=True)
+
+    try:
+        browser = BrowserView.instances.get(window.uid)
+        if browser is None and BrowserView.instances:
+            browser = next(iter(BrowserView.instances.values()))
+        edge = getattr(browser, "browser", None)
+        wv = getattr(edge, "webview", None)
+        if wv is None:
+            print(f"[su1ra] edge new-window handler: no webview (uid={window.uid!r}, instances={len(BrowserView.instances)})", flush=True)
+            return
+        if getattr(wv, "_su1ra_pane_nav", False):
+            return
+        # CoreWebView2 is only safely reachable on the UI thread; events.loaded
+        # fires from the JS-bridge thread. Marshal the install onto the UI thread
+        # and poll (briefly) until the controller is ready.
+        from System import Action as _Action
+
+        def _try_lock():
+            try:
+                return _install_locked()
+            except Exception as exc:
+                print(f"[su1ra] edge new-window handler: install try failed: {exc}", flush=True)
+                return False
+
+        attempts = 0
+        while attempts < 40 and not _WIN_PANE_NAV_INSTALLED:
+            _on_ui_thread(_try_lock)
+            if _WIN_PANE_NAV_INSTALLED:
+                break
+            time.sleep(0.1)
+            attempts += 1
+        if not _WIN_PANE_NAV_INSTALLED:
+            print("[su1ra] edge new-window handler: CoreWebView2 never became ready", flush=True)
+    except Exception as exc:
+        print(f"[su1ra] edge new-window handler: setup failed: {exc}", flush=True)
+
+
 def _install_new_window_handler():
     """Route `target="_blank"` navigations into the browser pane.
 
-    Every Bing/Google result link is `target="_blank"`. pywebview's GTK backend
-    handles those in `on_navigation` (decide-policy) by calling
-    `webbrowser.open()` — which yanks the user into Firefox. We hook
-    `decide-policy` ourselves, hand the URL to the frontend (which points the
-    pane's iframe at it) and call `decision.ignore()` to cancel the top-level
-    navigation so the app is not replaced.
+    Every Bing/Google result link is `target="_blank"`. There are two platform
+    backends to handle:
 
-    Note: hooking `create` instead does NOT work — returning a widget from that
-    signal crashes WebKit (`std::optional<WindowFeatures>` assertion), and
+    - Linux/GTK (WebKitGTK): pywebview's own `decide-policy` handler
+      (`on_navigation`) would `load_url` the main webview (replacing the app).
+      We detach it and install our own on `decide-policy`, routing the URL to
+      the pane's iframe and calling `decision.ignore()`.
+    - Windows/EdgeChromium (WebView2): pywebview's `NewWindowRequested` handler
+      calls `load_url` too — same end result. We detach and re-route.
+
+    Note (GTK): hooking `create` instead does NOT work — returning a widget from
+    that signal crashes WebKit (`std::optional<WindowFeatures>` assertion), and
     returning None lets the default navigation replace the app.
     """
+    if os.name == "nt":
+        return _install_new_window_handler_win()
     try:
         import gi
 

@@ -1117,7 +1117,7 @@ export default function App() {
 
   async function send(content, opts = {}) {
     const trimmed = content.trim()
-    const atts = opts.forceArmed ? [] : pendingAttachments
+    const atts = [...(opts.forceArmed ? [] : pendingAttachments), ...(opts.extraAttachments || [])]
     if ((!trimmed && atts.length === 0) || streaming) return
     if (trimmed.startsWith('/') && !opts.forceArmed) {
       await handleCommand(trimmed)
@@ -1253,7 +1253,7 @@ export default function App() {
       abortRef.current = null
       streamTargetRef.current = null
     }
-    const visible = splitThinking(partial)
+    const visible = splitThinking(partial, true)
       .filter((p) => !p.think)
       .map((p) => p.text)
       .join('\n')
@@ -1346,9 +1346,43 @@ export default function App() {
 
   // Browser pane -> chat: inject the fetched page text as a user message so
   // the model summarizes it. Errors surface as a system note, not a crash.
-  function summarizePage(page) {
+  // A `page.captured` result (pane screenshot) uploads as an image attachment
+  // and sends a vision prompt with it.
+  async function summarizePage(page) {
     if (page.error) {
       pushSystem(`// could not summarize ${page.url}\n// ${page.error}`)
+      return
+    }
+    if (page.captured) {
+      // Register an active conversation first (mirrors addFiles).
+      let convId = activeId
+      if (!activeConversation) {
+        const { system_prompt: _omit, ...defaults } = chatDefaultsRef.current
+        const conversation = await api.createConversation({ model: selectedModel, ...defaults, code_mode: codeArmed })
+        convId = conversation.id
+        setConversations((prev) => [conversation, ...prev])
+        setActiveId(convId)
+      }
+      try {
+        const bin = atob(page.captured)
+        const uint = new Uint8Array(bin.length)
+        for (let i = 0; i < bin.length; i++) uint[i] = bin.charCodeAt(i)
+        const file = new File([uint], `page-${Date.now()}.png`, { type: 'image/png' })
+        const ref = await api.uploadAttachment(convId, file)
+        const attachment = {
+          ...ref,
+          kind: 'image',
+          url: api.attachmentUrl(ref.id),
+          localId: ref.id,
+          imgIndex: 1,
+        }
+        await send(
+          `This is a screenshot of the current browser page in the right pane (${page.url}). Describe what it shows.`,
+          { forceArmed: false, extraAttachments: [attachment] },
+        )
+      } catch (err) {
+        pushSystem(`// could not attach screenshot: ${err?.message || err}`)
+      }
       return
     }
     const header = `Summarize this web page in under ~300 words. Focus on the main points; do not reproduce it verbatim.\n\n--- ${page.title || page.url} ---\n${page.url}\n\n`

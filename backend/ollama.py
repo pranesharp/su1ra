@@ -253,6 +253,35 @@ async def model_supports_vision(model):
     return supported
 
 
+_think_cache = {}
+
+
+async def model_supports_think(model):
+    """True when the model's chat template can honor Ollama's `think` toggle.
+
+    `think` is implemented in the MODEL'S TEMPLATE (the `{{ if .Think }}`
+    construct — the qwen3 family has it). GGUF-only imports whose template is
+    bare (e.g. `{{ .Prompt }}`) silently IGNORE the request value, so think:off
+    cannot stop their reasoning — it comes out as a plain ' thinking' preamble
+    in the content channel. Callers use this to log the gap (there is no
+    request-level lever for those models).
+    """
+    if model in _think_cache:
+        return _think_cache[model]
+    base = base_url()
+    template = ""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(f"{base}/api/show", json={"model": model})
+            resp.raise_for_status()
+            template = resp.json().get("template") or ""
+    except Exception:
+        return False
+    supported = ".Think" in template
+    _think_cache[model] = supported
+    return supported
+
+
 def models_dir():
     candidates = []
     if os.environ.get("OLLAMA_MODELS"):

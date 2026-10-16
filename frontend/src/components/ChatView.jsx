@@ -249,23 +249,34 @@ function UserMsg({ m, streaming, onResendFrom }) {
   )
 }
 
-export function splitThinking(content) {
+export function splitThinking(content, strictClose = false) {
+  // strictClose: final messages only. A ' thinking' opener with no ' response'
+  // closer downstream is NOT treated as a think section when strictClose is
+  // set. Some models (GGUF imports whose template lacks the .Think toggle —
+  // e.g. the MiniCPM5-2b-abliterated casual loadout) emit an inline
+  // ' thinking' preamble as ordinary CONTENT regardless of think:off, and never
+  // close it. While a message streams, keep the lenient rule (field-driven
+  // thinking collapses instead of flashing raw text); the final render uses
+  // strictClose so the model's preamble shows as content — including any real
+  // answer that currently gets swallowed inside an unclosed think block.
   const parts = []
   let rest = content
   let inThink = false
   while (rest) {
-    const openIdx = rest.indexOf('<think>')
-    const closeIdx = rest.indexOf('</think>')
-    let idx = -1
-    if (inThink) idx = closeIdx
-    else idx = openIdx === -1 ? -1 : closeIdx === -1 ? openIdx : Math.min(openIdx, closeIdx)
-    if (idx === -1) {
-      if (rest.trim()) parts.push({ think: inThink, text: rest })
+    const openIdx = rest.indexOf(' thinking')
+    const closeIdx = rest.indexOf(' response')
+    if (!inThink) {
+      if (openIdx === -1 || (closeIdx !== -1 && closeIdx < openIdx)) {
+        if (rest.trim()) parts.push({ think: false, text: rest })
+        break
+      }
+    } else if (closeIdx === -1) {
+      if (rest.trim()) parts.push({ think: !strictClose, text: rest })
       break
     }
+    const idx = inThink ? closeIdx : openIdx
     if (idx > 0) parts.push({ think: inThink, text: rest.slice(0, idx) })
-    const tagLen = inThink ? 8 : 7
-    rest = rest.slice(idx + tagLen)
+    rest = rest.slice(idx + (inThink ? 8 : 7))
     inThink = !inThink
   }
   return parts
@@ -314,7 +325,7 @@ function CodeBlock({ text, lang, className, children, props, onRunCode, onDownlo
 
 function AssistantContent({ content, toolCalls, streaming, onLoadToIde, onRunCode, onDownloadArtifact }) {
   if (!content && !(toolCalls || []).length) return streaming ? <span className="cursor" /> : null
-  const parts = splitThinking(content)
+  const parts = splitThinking(content, !streaming)
   return (
     <>
       {parts.map((p, i) =>

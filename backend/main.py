@@ -13,7 +13,7 @@ from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 import httpx
@@ -948,13 +948,96 @@ async def upload_attachment_from_path(body: AttachmentPathUpload):
         pass
     path = Path(raw)
     if not path.is_file():
-        raise HTTPException(404, f"file not found: {path.name or raw}")
+        raise HTTPException(404, "attachment path not found")
+    # Keep the filename, not the full path, and let _store_attachment infer kind.
+    data = path.read_bytes()
+    return _store_attachment(body.conversation_id, path.name, "", data)
+
+
+# --- Adblock rewrite proxy for the browser pane ---------------------------------
+# A sandboxed cross-origin iframe can't have ad nodes removed by the parent (the
+# parent can't reach into an already-loaded cross-origin document). The robust way
+# to adblock + still render a page is a backend rewrite proxy: the pane loads
+# `/?view=<url>` which fetches the page server-side, injects a consent blocklist
+# <style>, strips the worst ad/filter DOM, and serves the cleaned HTML. Bonus:
+# the badge/summarize then reflect the SAME fetched content (no probe-render
+# divergence), and adblock stops being a pipe dream for the sandbox.
+
+AD_BLOCK_CSS = """
+[data-ad-slot], [data-ad-client], [data-ad-zone], .ad-container, .advertisement,
+.ad-banner, .ad-slot, .adsbygoogle, .dfp-ad, .google-ad, #ad, #ads, .banner-ad,
+.advert, .ad-box, .sponsored, [class*="ad-"][class*="-wrapper"], [id^="google_ads"],
+iframe[src*="doubleclick"], iframe[src*="adservice"], iframe[src*="/ads/"],
+iframe[src*="adnxs"], [aria-label="Advertisement"], .readerAd, .ad-box {
+  display: none !important; visibility: hidden !important; height: 0 !important;
+  overflow: hidden !important; pointer-events: none !important;
+}
+"""
+
+
+def _strip_ad_dom(html: str) -> str:
+    """Remove the most common ad/cookie DOM nodes via regex (no bs4 dependency
+    in this path — it's hot, per-frame). Best-effort; the CSS does the heavy.
+    """
+    # remove <script> that pulls ads / tag managers (leave the page's own)
+    pat = re.compile(
+        r"(?is)<(script|iframe)[^>]+(?:" + "|".join([
+            r"doubleclick\.net",
+            r"googletagmanager\.com/gtag",
+            r"googlesyndication\.com",
+            r"google-analytics\.com/ga\.js",
+            r"amazon-adsystem",
+            r"adservice\.",
+            r"/ads?/",
+            r"2mdn\.net",
+            r"criteo\.com",
+            r"taboola\.com",
+            r"outbrain\.com",
+            r"quantcast\.com",
+            r"scorecardresearch",
+        ]) + r")[^>]*>.*?</\1>",
+        re.S,
+    )
+    html = pat.sub(" ", html)
+    # Also drop the well-known empty ad/wrapper markup (best-effort; the CSS
+    # blocklist is the primary ad-riddance, this just trims a few DOM remnants).
+    html = re.sub(r'(?is)<div[^>]*(?:class|id)="[^"]*ad[a-zA-Z0-9_-]*"[^>]*\s*>\s*</div>', ' ', html)
+    html = re.sub(r"(?is)<div[^>]*(?:class|id)='[^']*ad[a-zA-Z0-9_-]*'[^>]*\s*>\s*</div>", ' ', html)
+    return html
+
+
+@app.get("/api/page/view")
+async def page_view(url: str = ""):
+    """Rewrite-and-serve proxy: fetch `url`, inject the ad blocklist, serve the
+    cleaned HTML to the pane's iframe. Lets adblocking work on a sandboxed
+    cross-origin iframe (the parent couldn't touch the loaded doc otherwise).
+    """
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "url must start with http:// or https://")
     try:
-        data = path.read_bytes()
-    except OSError as exc:
-        raise HTTPException(422, f"could not read file: {exc}")
-    ref = _store_attachment(body.conversation_id, body.filename or path.name, "", data)
-    return {"attachment": ref}
+        resp = httpx.get(
+            url,
+            headers={"User-Agent": documents.PAGE_USER_AGENT},
+            follow_redirects=True,
+            timeout=20.0,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(502, f"could not fetch page: {exc.response.status_code}")
+    except Exception as exc:
+        raise HTTPException(502, f"could not fetch page: {exc}")
+    ctype = (resp.headers.get("content-type") or "").lower()
+    if "html" not in ctype and "text" not in ctype:
+        # Non-HTML (pdf, image, ...) — hand it to the browser as-is.
+        return Response(content=resp.content, media_type=ctype or "application/octet-stream")
+    html = _strip_ad_dom(resp.text)
+    # Inject blocklist <style> into <head> (or fall back to a top-of-body <style>).
+    block = f"<style>{AD_BLOCK_CSS}</style>"
+    if re.search(r"(?i)</head>", html):
+        html = html.replace("</head>", block + "</head>", 1)
+    else:
+        html = block + html
+    return HTMLResponse(content=html)
 
 
 @app.get("/api/attachments/{attachment_id}")
@@ -1511,6 +1594,20 @@ async def chat(body: ChatRequest):
     # the client asked for. (The old ```python auto-arm is gone on purpose.)
     tools = TOOLS if body.tools and body.code_mode and await ollama.model_supports_tools(model) else None
     think = body.think if body.think is not None else conversation.get("think")
+    if os.environ.get("SU1RA_DEBUG") == "1":
+        # The think-leak diagnostic: what did the request resolve to, and can
+        # the model even honor it? GGUF imports with a bare template ignore the
+        # `think` toggle — their reasoning arrives as a ' thinking' preamble in
+        # the content channel (no request-level lever exists).
+        think_off = think is False or str(think).strip().lower() in ("off", "false", "0")
+        try:
+            supported = await ollama.model_supports_think(model)
+        except Exception:
+            supported = None
+        line = f"[su1ra:chat] model={model} think={think!r} (body={body.think!r} conv={conversation.get('think')!r}) code_mode={body.code_mode} think-toggle-supported={supported}"
+        if think_off and supported is False:
+            line += " — model CANNOT honor think:off; reasoning may still appear"
+        print(line, flush=True)
     # The stored system prompt only applies in code mode — casual chats
     # go out with no system prompt.
     # System prompts are per-mode: build carries the bundled sysp.txt default
