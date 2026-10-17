@@ -250,28 +250,43 @@ function UserMsg({ m, streaming, onResendFrom }) {
 }
 
 export function splitThinking(content, strictClose = false) {
-  // strictClose: final messages only. A ' thinking' opener with no ' response'
-  // closer downstream is NOT treated as a think section when strictClose is
-  // set. Some models (GGUF imports whose template lacks the .Think toggle —
-  // e.g. the MiniCPM5-2b-abliterated casual loadout) emit an inline
-  // ' thinking' preamble as ordinary CONTENT regardless of think:off, and never
-  // close it. While a message streams, keep the lenient rule (field-driven
-  // thinking collapses instead of flashing raw text); the final render uses
-  // strictClose so the model's preamble shows as content — including any real
-  // answer that currently gets swallowed inside an unclosed think block.
+  // Markers are the backend's own wrappers: ollama.py stream_chat emits
+  // "<think>\n" on the first thinking-field delta, "\n</think>\n\n" when
+  // content resumes and "\n</think>" at done. GGUF imports whose template
+  // lacks the .Think toggle (e.g. the MiniCPM5-2b-abliterated casual loadout)
+  // emit the same "<think>" inline as ordinary CONTENT regardless of
+  // think:off and never close it, and a mid-stream tool call can strand an
+  // opener in the message that finally gets committed.
+  // strictClose: final messages only. While a message streams, an unclosed
+  // "<think>" tail collapses entirely (field-driven thinking greys out
+  // instead of flashing raw text). On the final render the tail still
+  // collapses but splits at its last blank line, so a real answer following
+  // the reasoning stays visible as content; with no blank line the whole tail
+  // is reasoning and collapses. (strictClose used to render unclosed tails as
+  // content — that leaked raw reasoning into chat.)
   const parts = []
   let rest = content
   let inThink = false
   while (rest) {
-    const openIdx = rest.indexOf(' thinking')
-    const closeIdx = rest.indexOf(' response')
+    const openIdx = rest.indexOf('<think>')
+    const closeIdx = rest.indexOf('</think>')
     if (!inThink) {
       if (openIdx === -1 || (closeIdx !== -1 && closeIdx < openIdx)) {
         if (rest.trim()) parts.push({ think: false, text: rest })
         break
       }
     } else if (closeIdx === -1) {
-      if (rest.trim()) parts.push({ think: !strictClose, text: rest })
+      if (rest.trim()) {
+        const splitAt = strictClose ? rest.lastIndexOf('\n\n') : -1
+        if (splitAt === -1) {
+          parts.push({ think: true, text: rest })
+        } else {
+          const thinkPart = rest.slice(0, splitAt)
+          const answer = rest.slice(splitAt)
+          if (thinkPart.trim()) parts.push({ think: true, text: thinkPart })
+          if (answer.trim()) parts.push({ think: false, text: answer })
+        }
+      }
       break
     }
     const idx = inThink ? closeIdx : openIdx

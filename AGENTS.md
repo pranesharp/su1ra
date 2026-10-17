@@ -389,12 +389,16 @@ wipes everything) · /clear (current chat messages only, chat + settings kept) �
     false/omitted/system-directive; reasoning arrives in the CONTENT channel,
     not the `thinking` field). The frontend send path was NOT the bug (new
     SU1RA_DEBUG log at main.py:1596 proves `body='off'` reaches the backend).
-    Fixes: `splitThinking(content, strictClose)` — final messages with an
-    unclosed ' thinking' opener render as content (no more whole reply swallowed
-    in a think block; chat 65 msg 496 peaked at 2610 chars of reasoning and ZERO
-    answer); streaming keeps the lenient rule. **No request-level lever stops
-    this model thinking — casual loadout should move to a qwen3-family model if
-    think-off must suppress reasoning.**
+    splitThinking fix (2026-10-17, supersedes the 6e955e6 strictClose rule —
+    see session-log): markers are the backend's own `<think>`/`</think>` wrappers
+    (`6e955e6` searched `' thinking'`/`' response'`, which never occur in real
+    content, so NOTHING ever collapsed and reasoning rendered raw). Unclosed
+    `<think>` tail collapses while streaming and, on the final render, splits at
+    its LAST `\n\n` — the answer stays visible as content; no blank line →
+    collapse all. Harness `report/report/repro-split-thinking.mjs` (19 cases) +
+    shipped-bundle live e2e PASS. **No request-level lever stops MiniCPM thinking
+    — but it is no longer on this box (models now: AbGem4-e2b + Qwen3.8-9b);
+    re-check the casual loadout in /settings.**
   - **C. adblock** — backend re-verified via curl (blocklist injected into head);
     `ab: on` click-through still pending.
 - Also DONE + user-confirmed this session: **EdgeChromium link-click fix** —

@@ -1752,3 +1752,53 @@ endpoint 200 with cpu/ram/disk) passes.
   screenshot lands in chat as an image; casual /web summarize with think off
   (the ' thinking' preamble now renders as visible content, not a dead think
   block); `ab: on` on a fetchable page. Then commit the batch.
+
+## 2026-10-17: think blocks never collapse — splitThinking rewritten back to <think> markers (+ unclosed-tail blank-line split)
+
+- **Symptom:** model reasoning rendered as RAW literal text in chat (e.g. `<think>…</think>`
+  visible inline, the " thinking" spelling in earlier notes is an artifact of the angle
+  brackets being eaten when pasting into a chat UI), in /build think-on and believed /casual
+  too. Desired: reasoning ALWAYS inside the greyed "▸ thinking · N chars" block.
+- **Root cause (corrects the 2026-10-16 diagnosis):** commit `6e955e6` rewrote
+  `ChatView.splitThinking` to search for the 9-char strings `' thinking'` / `' response'`
+  while keeping the old `? 8 : 7` slice lengths. But those strings NEVER occur in real
+  content — `ollama.py stream_chat` emits `<think>\n` / `\n</think>\n\n` / `\n</think>`
+  (ollama.py:553/563/582) and app.db stores exactly that (verified: marker census over
+  messages — `<think>` present, `' thinking'` count ZERO; pre-`6e955e6` code searched
+  `<think>`/`</think>`). So after `6e955e6` NOTHING ever matched: no think section ever
+  collapsed and every reasoning block rendered raw. The off-by-two leak and the strictClose
+  rule from the old diagnosis were real but secondary — a literal 9-char fix would have
+  changed nothing on screen.
+- **Fix (ChatView.jsx, `splitThinking` — signature kept):** markers back to
+  `<think>`/`</think>` (existing `? 8 : 7` ternary is now CORRECT: 7=`<think>`, 8=`</think>`).
+  Unclosed `<think>` tail: while streaming, collapse the whole tail (lenient rule — no raw
+  flash). On the final render (strictClose=true) the tail still collapses but splits at its
+  LAST blank line (`\n\n`) so a real answer following the reasoning stays visible as content;
+  no blank line → collapse everything (models separate reasoning from the reply with a blank
+  line). strictClose no longer renders reasoning as content — the original MiniCPM complaint
+  (whole reply hidden in think) is solved by the blank-line split, not by un-collapsing.
+  Comment block re-documented. Nothing else touched (ThinkBlock CSS, sysp.txt, backend all
+  unchanged). App.jsx:1256 artifact bridge keeps working: the answer after the split is still
+  a non-think part; reasoning-only tails no longer leak reasoning fences into the artifact
+  extractor (strict improvement).
+- **Verified:** (1) `node report/report/repro-split-thinking.mjs` — 19/19 PASS (closed block
+  no-litter, reopened think, unclosed+blank-line+answer final AND streaming, unclosed no
+  answer, multi-paragraph last-boundary trade-off, `' thinking'` mid-sentence prose untouched,
+  stray `<think>` in prose, think-only, empty/null, default-arg parity, artifact-bridge
+  reachability, no raw markers in any part). (2) `npm run build` ok
+  (`dist/assets/index-BHnOaJl4.js`). (3) Bundle fingerprint: minified
+  `function FP(t,e=!1)` contains `indexOf("<think>")` / `indexOf("</think>")` + the
+  `lastIndexOf("\n\n")` split; `indexOf(" thinking")` absent. (4) LIVE e2e: started
+  desktop.py (backend :8000 + ollama 0.40.1 up), Qwen3.8-9b build-mode think-on reply
+  committed `<think>…</think>` content; that exact committed string through the SHIPPED
+  minified FP → [THINK 837 chars, no raw markers] + [CONTENT "The capital of Australia is
+  Canberra."]; second turn with a tool request split the same way (THINK + python-fence
+  CONTENT). Native tool_calls strand not reproducible on demand with this model (it used the
+  fenced-python fallback, which closes the block) — unclosed shapes covered by the harness.
+  Browser MCP permission not granted, so visual click-through in the window is the user's
+  step (tree left uncommitted for it). Test conversation 78 deleted via API; temp files
+  removed; stray `.abacusai/temp/image_conv.jpg` deleted.
+- Model inventory note: box NOW holds `AbGem4-e2b:latest` + `Qwen3.8-9b:latest`;
+  `abminicpm52b:latest` is GONE — the casual-think-leak mitigation (switch casual loadout to
+  a think-honouring model) may already be moot; casual loadout model setting should be
+  re-checked in /settings.

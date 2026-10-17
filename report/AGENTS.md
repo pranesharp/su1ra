@@ -368,10 +368,17 @@ wipes everything) · /clear (current chat messages only, chat + settings kept) �
     MiniCPM5-2b-abliterated import with bare `{{ .Prompt }}` template → Ollama
     IGNORES `think:false` (verified live through /api/chat; SU1RA_DEBUG log at
     main.py:1596 proves body='off'; send path not the bug). Reasoning arrives in
-    the CONTENT channel; `splitThinking(content, strictClose)` now renders a final
-    message with an unclosed ' thinking' opener as content (answer no longer
-    swallowed; chat 65 msg 496 was 2610 chars of reasoning, zero answer). No
-    request-level lever stops this model — consider a qwen3-family casual loadout.
+    the CONTENT channel; splitThinking fix (2026-10-17, supersedes the 6e955e6
+    strictClose rule — see session-log): markers are the backend's own
+    `<think>`/`</think>` wrappers (`6e955e6` searched `' thinking'`/`' response'`,
+    which never occur in real content, so NOTHING ever collapsed and reasoning
+    rendered raw). Unclosed `<think>` tail collapses while streaming and, on the
+    final render, splits at its LAST `\n\n` — answer stays visible as content; no
+    blank line → collapse all (chat 65 msg 496, 2610 chars zero answer, renders
+    collapsed). Harness `report/report/repro-split-thinking.mjs` (19 cases) +
+    shipped-bundle live e2e PASS. No request-level lever stops this model — but
+    it is no longer on the box (models now: AbGem4-e2b + Qwen3.8-9b); re-check
+    the casual loadout in /settings.
   - **C. adblock** — backend re-verified; `ab: on` click-through pending.
 - Also DONE + user-confirmed: **EdgeChromium link-click fix** —
   `desktop.py._install_new_window_handler_win()` (pane clicks no longer replace the
