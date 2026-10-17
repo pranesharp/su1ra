@@ -1413,6 +1413,71 @@ button {
   font-weight: 600;
 }
 
+/* filled accent buttons — the action style for new surfaces (explorer,
+   browser foot, resource strip, cart) instead of the [ bracket ] chrome */
+.btn-solid {
+  flex-shrink: 0;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  background: var(--accent);
+  color: #ffffff;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-solid:hover:not(:disabled) {
+  background: var(--accent-bright);
+  border-color: var(--accent-bright);
+}
+.btn-solid:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.btn-solid.ghost {
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+}
+.btn-solid.ghost:hover:not(:disabled) {
+  background: var(--accent);
+  color: #ffffff;
+}
+.btn-solid.done {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent-bright);
+  opacity: 1;
+}
+
+/* per-row delete in the scratch explorer (two-click confirm: − -> sure?) */
+.explorer-del {
+  flex-shrink: 0;
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  padding: 1px 5px;
+  cursor: pointer;
+  visibility: hidden;
+}
+.explorer-row:hover .explorer-del,
+.explorer-del.armed {
+  visibility: visible;
+}
+.explorer-del:hover {
+  color: var(--accent-bright);
+}
+.explorer-del.armed {
+  color: #ffffff;
+  background: var(--accent);
+  border-radius: 3px;
+  font-size: 10px;
+}
+
 .explorer-twist {
   width: 10px;
   flex-shrink: 0;
@@ -1680,6 +1745,134 @@ button {
   opacity: 0.85;
   color: #e0a04a;
   border-top: 1px dashed var(--border);
+}
+
+/* resource cart — pages staged to send into the chat as [doc N] documents */
+.cart-panel {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  max-height: 40%;
+  overflow-y: auto;
+}
+.cart-panel .cart-head,
+.cart-box .cart-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--accent-bright);
+  border-bottom: 1px dashed var(--border);
+}
+.resource-banner {
+  border-bottom: 1px solid var(--border);
+}
+.cart-box {
+  border-bottom: 1px dashed var(--border);
+}
+.cart-items {
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+}
+.cart-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px;
+  font-size: 11px;
+  min-width: 0;
+}
+.cart-item .cart-topic {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg, #d6d6da);
+}
+.resource-item {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 4px 12px;
+}
+.resource-item .cart-topic {
+  flex: initial;
+  max-width: 100%;
+  color: var(--accent-bright);
+  white-space: normal;
+}
+.resource-item .cart-why,
+.resource-item .cart-hint {
+  color: var(--muted);
+  font-size: 11px;
+}
+.cart-mode {
+  flex-shrink: 0;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.cart-actions {
+  display: flex;
+  gap: 8px;
+  padding: 6px 12px;
+}
+
+/* composer resource strip — the pending request_resources ask, always at
+   the input so the loop (find -> add to cart -> send) stays one click away */
+.resource-strip {
+  max-width: 820px;
+  width: 100%;
+  margin: 0 auto 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 4px;
+  background: var(--accent-soft);
+  padding: 6px 10px;
+}
+.resource-strip-head {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--accent-bright);
+  margin-bottom: 4px;
+}
+.resource-strip-items {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.resource-strip-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 11px;
+  min-width: 0;
+}
+.resource-strip-item .rs-topic {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg, #d6d6da);
+}
+.resource-strip-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.resource-strip .rs-note {
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .browser-badge {

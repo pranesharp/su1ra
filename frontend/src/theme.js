@@ -84,6 +84,7 @@ export function deriveHueFamily(hex) {
 
 export function applyAccent(hex) {
   const root = document.documentElement.style
+  hex = hex || DEFAULT_ACCENT // defense in depth — an undefined accent must not crash the render
   root.setProperty('--accent', hex)
   root.setProperty('--accent-bright', mix(hex, '#ffffff', 0.3))
   root.setProperty('--accent-soft', alpha(hex, 0.12))

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { pageInfo, pageSummarize } from '../api'
 
-export default function ArtifactPane({ width, code, tab, onTab, onClose, onDownload, path, browserUrl, browserHistory, browserIndex, browserEngine, onBrowserNavigate, onBrowserBack, onBrowserForward, onBrowserClose, onBrowserEngineChange, conversationId, onSummarize }) {
+export default function ArtifactPane({ width, code, tab, onTab, onClose, onDownload, path, browserUrl, browserHistory, browserIndex, browserEngine, onBrowserNavigate, onBrowserBack, onBrowserForward, onBrowserClose, onBrowserEngineChange, conversationId, onSummarize, cart, pendingRequest, onAddToCart, onSendCart, onSkipCart, onRemoveCartItem, onCartMode, onClearCart }) {
   const [urlText, setUrlText] = useState(browserUrl || '')
   const [info, setInfo] = useState(null)
   const [summarizing, setSummarizing] = useState(false)
@@ -43,15 +43,17 @@ export default function ArtifactPane({ width, code, tab, onTab, onClose, onDownl
     ? `/api/page/view?url=${encodeURIComponent(browserUrl)}`
     : browserUrl
 
-  // Capture the current view (native screenshot when available) and hand it to
-  // the chat as an image so a vision model can "see" the page.
+  // Capture the current view (native screenshot when available) and either
+  // hand it to the chat as an image (dest 'chat', vision model "sees" the
+  // page) or stage it in the resource cart (dest 'cart').
   //
   // capture_pane() now returns IMMEDIATELY (it must not block the UI thread) and
   // delivers the PNG asynchronously by invoking window.__su1raCaptureResult(png).
   // So we register that callback, kick off the capture, and treat its arrival as
   // completion. If no result arrives within a few seconds we tell the user.
-  async function capturePage() {
+  async function capturePage(dest = 'chat') {
     if (!browserUrl || capturing) return
+    const toCart = dest === 'cart'
     if (!window.pywebview?.api?.capture_pane) {
       onSummarize({ error: 'screenshot requires the desktop app (no native bridge in browser preview)', url: 'capture' })
       return
@@ -66,7 +68,12 @@ export default function ArtifactPane({ width, code, tab, onTab, onClose, onDownl
       clearTimeout(timer)
       window.__su1raCaptureResult = null
       setCapturing(false)
-      onSummarize({ captured: pngBase64, url: browserUrl })
+      if (toCart) {
+        const base = (info?.title || urlText || 'capture').replace(/[<>:"/\\|?*]/g, '').trim().slice(0, 60) || 'capture'
+        onAddToCart({ kind: 'image', data: pngBase64, title: `${base}-snap.png` })
+      } else {
+        onSummarize({ captured: pngBase64, url: browserUrl })
+      }
     }
     // Send the pane's on-screen rect so the native side can crop the window
     // shot down to just the page. CSS px viewport coords are the crop inputs
@@ -100,6 +107,7 @@ export default function ArtifactPane({ width, code, tab, onTab, onClose, onDownl
     // implying the probe is still "checking".
     const inconclusive = info && !isHtml && !isJs && !blocked
     const probed = info && !blocked && (isHtml || isJs || inconclusive)
+    const carted = (cart || []).some((c) => c.url === browserUrl)
     const badgeTitle = info?.frame_reason
       ? `${info.frame_reason} — blocked from embedding`
       : inconclusive
@@ -172,8 +180,8 @@ export default function ArtifactPane({ width, code, tab, onTab, onClose, onDownl
         )}
         <div className="browser-foot">
           {isHtml || inconclusive ? (
-            <button className="term-btn accent" disabled={summarizing} onClick={summarize}>
-              {summarizing ? '[ summarizing... ]' : '[ summarize page ]'}
+            <button className="btn-solid" disabled={summarizing} onClick={summarize}>
+              {summarizing ? 'summarizing…' : 'summarize page'}
             </button>
           ) : (
             <span className="browser-note">
@@ -184,12 +192,87 @@ export default function ArtifactPane({ width, code, tab, onTab, onClose, onDownl
                   : '// checking page...'}
             </span>
           )}
+          <button
+            className="btn-solid ghost"
+            disabled={capturing}
+            title="screenshot this page into the resource cart (needs the desktop app)"
+            onClick={() => capturePage('cart')}
+          >
+            {capturing ? 'snapping…' : 'snap to cart'}
+          </button>
+          <button
+            className={`btn-solid${carted ? ' done' : ''}`}
+            disabled={carted}
+            title="stage this page for the chat — it arrives as a [doc N] document the model can read"
+            onClick={() => onAddToCart({ url: browserUrl, title: info?.title || urlText || browserUrl })}
+          >
+            {carted ? 'in cart ✓' : 'add to cart'}
+          </button>
           {inconclusive && (
             <span className="browser-note browser-note-probe">
               // couldn't probe from the backend (blocked/unreachable) — iframe may still render it
             </span>
           )}
         </div>
+        {(pendingRequest || (cart && cart.length > 0)) && (
+          <div className="cart-panel">
+            {pendingRequest && (
+              <div className="resource-banner">
+                <div className="cart-head">! resources requested</div>
+                <ul className="cart-items">
+                  {pendingRequest.items.map((it, i) => (
+                    <li key={i} className="cart-item resource-item">
+                      <span className="cart-topic">{it.topic}</span>
+                      {it.why && <span className="cart-why">— {it.why}</span>}
+                      {it.search_hint && <span className="cart-hint">search: {it.search_hint}</span>}
+                    </li>
+                  ))}
+                </ul>
+                {!cart?.length && (
+                  <div className="browser-note">// cart is empty — search the topics above in this pane, then [ add to cart ]</div>
+                )}
+              </div>
+            )}
+            {cart?.length > 0 && (
+              <div className="cart-box">
+                <div className="cart-head">
+                  <span>cart ({cart.length})</span>
+                  <span style={{ flex: 1 }} />
+                  <button className="btn-solid ghost" onClick={onClearCart}>clear</button>
+                </div>
+                <ul className="cart-items">
+                  {cart.map((c, i) => (
+                    <li key={`${c.url}-${i}`} className="cart-item">
+                      <span className="cart-topic" title={c.url}>{c.title || c.url}</span>
+                      {c.kind !== 'image' && (
+                        <select className="cart-mode" value={c.mode || 'raw'} onChange={(e) => onCartMode(i, e.target.value)}>
+                          <option value="raw">raw text</option>
+                          <option value="summarize">summarize</option>
+                        </select>
+                      )}
+                      {c.kind === 'image' && <span className="cart-mode">screenshot</span>}
+                      <button className="explorer-del" title="remove from cart" onClick={() => onRemoveCartItem(i)}>
+                        −
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {cart?.length > 0 && (
+              <div className="cart-actions">
+                <button className="btn-solid" onClick={onSendCart}>
+                  {pendingRequest ? 'send cart to chat' : 'send to chat as docs'}
+                </button>
+                {pendingRequest && (
+                  <button className="btn-solid ghost" title="decline — the model proceeds without the material" onClick={onSkipCart}>
+                    skip
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </aside>
     )
   }

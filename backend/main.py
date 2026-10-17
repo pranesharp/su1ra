@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import io
 import json
 import os
 import re
@@ -404,6 +405,52 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "request_resources",
+            "description": (
+                "Ask the user to provide reference material (web pages, docs) when you need "
+                "authoritative ground truth you cannot trust from memory: exact API "
+                "signatures, parameter types, initialization contracts, file format "
+                "specifications, memory layouts, protocol details. Broad-but-shallow "
+                "knowledge of WHAT an API is may come from memory, but exact details must "
+                "come from sources the user provides. Each item is one specific request the "
+                "user can find with a web search. AFTER calling this tool, STOP generating "
+                "— do not write code and do not call further tools. The user will reply "
+                "with the resources attached as [doc N] documents (or a decline); then call "
+                "read_document to consult them before continuing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "description": "1-10 specific resource requests",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "topic": {
+                                    "type": "string",
+                                    "description": "Specific enough that the user can find the exact page, e.g. 'Microsoft Learn page for the OpenProcess Win32 API'",
+                                },
+                                "why": {
+                                    "type": "string",
+                                    "description": "What you will do with it, e.g. 'get the exact OpenProcess signature and dwDesiredAccess flags before writing the ctypes binding'",
+                                },
+                                "search_hint": {
+                                    "type": "string",
+                                    "description": "Optional search query the user can paste into a search engine",
+                                },
+                            },
+                            "required": ["topic", "why"],
+                        },
+                    },
+                },
+                "required": ["items"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "build_pptx",
             "description": (
                 "Build a real .pptx presentation from a structured outline. ALWAYS prefer "
@@ -603,6 +650,64 @@ def read_document_slice(conversation_id, arguments):
     return f"{header}\n{chunk}"
 
 
+MAX_RESOURCE_ITEMS = 10
+# Raw fetch cap per cart item: raw text is the default because summarization
+# strips the exact signatures/types/patterns that fix hallucinations; long
+# pages are fine because read_document paginates.
+RAW_FETCH_CHARS = 150_000
+# Summarize mode feeds at most this much page text to the one-shot model call.
+SUMMARIZE_INPUT_CHARS = 60_000
+
+
+def clean_resource_items(raw):
+    """Normalize request_resources args — normalize-don't-reject: a single
+    dict or bare string is accepted as a one-item list, junk is dropped,
+    strings are trimmed, count clamped to 10. Raises ValueError with a
+    teaching message when nothing usable remains."""
+    if isinstance(raw, (str, dict)):
+        raw = [raw]
+    if not isinstance(raw, list):
+        raise ValueError("pass 'items': 1-10 entries, each with a 'topic' (and ideally a 'why')")
+    items = []
+    for entry in raw[: MAX_RESOURCE_ITEMS * 5]:
+        if isinstance(entry, str):
+            entry = {"topic": entry}
+        if not isinstance(entry, dict):
+            continue
+        topic = str(entry.get("topic") or "").strip()
+        if not topic:
+            continue
+        item = {"topic": topic[:300], "why": str(entry.get("why") or "").strip()[:500]}
+        hint = str(entry.get("search_hint") or "").strip()
+        if hint:
+            item["search_hint"] = hint[:300]
+        items.append(item)
+        if len(items) >= MAX_RESOURCE_ITEMS:
+            break
+    if not items:
+        raise ValueError("need 1-10 items, each with a 'topic' the user can search for (plus a short 'why')")
+    return items
+
+
+def format_resource_request(items):
+    """Human/tool-result text for a stored resource request: echo the topics
+    back and teach the stop-and-wait contract."""
+    lines = ["[resource request sent to the user]"]
+    for i, it in enumerate(items, 1):
+        line = f"{i}. {it['topic']}"
+        if it.get("why"):
+            line += f" — {it['why']}"
+        if it.get("search_hint"):
+            line += f" (search hint: {it['search_hint']})"
+        lines.append(line)
+    lines.append(
+        "STOP generating now and wait — do not write code or call more tools. "
+        "The user will reply with the resources attached as [doc N] documents (or a "
+        "decline); then consult them with read_document before continuing."
+    )
+    return "\n".join(lines)
+
+
 def build_history(rows):
     out = []
     for m in rows:
@@ -642,15 +747,80 @@ def finalize_tool_call(entry):
     return {"function": {"name": entry["name"], "arguments": args}}
 
 
+_TOOL_NAMES = frozenset(t["function"]["name"] for t in TOOLS)
+# Literal special tokens models leak into content when they break their own
+# tool-call template (observed: Qwen3.8 emitting "<|tool_call|>call:read_document[doc:1]").
+_SPECIAL_TOKEN_RE = re.compile(r"<\|/?tool_(?:call|response)\|?>|</?tool_call>", re.I)
+
+
+def _coerce_scalar(v):
+    v = v.strip().strip('"\'')
+    if v.lower() in ("true", "false"):
+        return v.lower() == "true"
+    try:
+        return int(v)
+    except ValueError:
+        pass
+    try:
+        return float(v)
+    except ValueError:
+        pass
+    return v
+
+
+def _kv_args(inner):
+    """'doc:1, offset:0' / 'doc=1' -> {'doc': 1, 'offset': 0} (best effort)."""
+    args = {}
+    for part in re.split(r"[,;\n]+", inner):
+        if ":" in part:
+            k, _, v = part.partition(":")
+        elif "=" in part:
+            k, _, v = part.partition("=")
+        else:
+            continue
+        k = k.strip().strip('"\'')
+        if k and k not in args:
+            args[k] = _coerce_scalar(v)
+    return args
+
+
 def detect_content_tool_call(text):
     body = text.strip()
     if "<tool_call>" in body:
         body = body.replace("<tool_call>", "").replace("<" + "/tool_call>", "").strip()
+    if _SPECIAL_TOKEN_RE.search(body):
+        body = _SPECIAL_TOKEN_RE.sub(" ", body).strip()
     if body.startswith("```"):
         lines = body.splitlines()
         if len(lines) >= 2:
             body = "\n".join(lines[1:-1]).strip()
     if not body.startswith("{"):
+        # Healed shapes: "call:NAME[k:v,...]", 'NAME({...})', 'NAME[k:v]' —
+        # the model's tool call leaked as plain text (possibly mid-prose,
+        # after a </think>, or with trailing junk). Run the tool instead of
+        # rendering the garbage as a final answer (which deadlocks: the model
+        # waits for a tool response that never comes).
+        body = re.sub(r"</?think>", " ", body, flags=re.I)
+        matches = list(re.finditer(
+            r"(?:call\s*[:=]\s*)?([a-z_][a-z0-9_]*)\s*(?:\(|\[|\{)(.+?)(?:\)|\]|\})",
+            body,
+            re.I | re.S,
+        ))
+        for m in reversed(matches):
+            if m.group(1).lower() not in _TOOL_NAMES:
+                continue
+            inner = m.group(2)
+            args = None
+            m2 = re.search(r"\{.*\}", inner, re.S)
+            if m2:
+                try:
+                    args = json.loads(m2.group(0))
+                except json.JSONDecodeError:
+                    args = None
+            if not isinstance(args, dict):
+                args = _kv_args(inner)
+            if args:
+                return {"name": m.group(1), "args": args}
         return None
     try:
         parsed = json.loads(body)
@@ -664,7 +834,7 @@ def detect_content_tool_call(text):
     else:
         name = parsed.get("name")
         raw_args = parsed.get("arguments")
-    if name not in {t["function"]["name"] for t in TOOLS}:
+    if name not in _TOOL_NAMES:
         return None
     return {"name": name, "args": raw_args}
 
@@ -865,6 +1035,277 @@ async def page_summarize(body: PageSummarizeRequest):
             "so it can't be summarized. Try [ open externally ].",
         )
     return page
+
+
+# --- Resource requests + cart (RAG-style ground truth for the model) -----------
+# The model calls request_resources when it needs authoritative reference
+# material; the user collects pages in the /web pane's cart and sends them.
+# Resources arrive as ordinary kind="document" attachments (meta.source =
+# "context_resource") so the EXISTING [doc N] labeling, read_document slicing
+# and attach_to_message numbering all apply unchanged — no parallel system.
+
+class CartItem(BaseModel):
+    url: str = ""
+    title: str = ""
+    mode: str = "raw"       # "raw" (default — verbatim text) | "summarize"
+    kind: str = "page"      # "page" | "image" (base64 PNG in `data`)
+    data: str = ""
+
+
+class CartSendRequest(BaseModel):
+    conversation_id: int
+    items: list[CartItem] = []
+
+
+@app.get("/api/context/resource-request")
+async def context_resource_request(conversation_id: int):
+    """Poll target for the cart UI: the conversation's open resource request."""
+    req = store.get_pending_resource_request(conversation_id)
+    return req or {"id": None, "items": []}
+
+
+async def summarize_page_text(model, title, text):
+    """One-shot ~600-word summary via the conversation's own model
+    (non-streaming /api/chat). Raises on any failure — the caller falls back
+    to the raw text."""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0)) as client:
+        resp = await client.post(
+            f"{ollama.base_url()}/api/chat",
+            json={
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Summarize the document faithfully. Keep exact names, "
+                        "signatures, parameter lists, flags and code snippets verbatim. "
+                        "Stay under 600 words.",
+                    },
+                    {"role": "user", "content": f"{title}\n\n{text[:SUMMARIZE_INPUT_CHARS]}"},
+                ],
+                "stream": False,
+                "options": {"temperature": 0.2},
+            },
+        )
+    resp.raise_for_status()
+    content = ((resp.json().get("message") or {}).get("content")) or ""
+    if not content.strip():
+        raise RuntimeError("empty summary")
+    return content.strip()
+
+
+@app.post("/api/context/cart/send")
+async def context_cart_send(body: CartSendRequest):
+    """Deliver cart items from the /web pane as conversation attachments and
+    fulfill any open resource request. items=[] is the Skip path: fulfill with
+    nothing attached. A bad item becomes a per-item error, never a failed request."""
+    conversation = store.get_conversation(body.conversation_id)
+    if not conversation:
+        raise HTTPException(404, "Conversation not found")
+
+    async def one(item: CartItem):
+        """-> (attachment ref, None) or (None, error string)."""
+        if item.kind == "image":
+            # Screenshot cart item: ride the normal image attachment path.
+            try:
+                data = base64.b64decode(item.data or "", validate=True)
+            except Exception:
+                return None, "invalid base64 image data"
+            try:
+                return _store_attachment(body.conversation_id, item.title or "capture.png", "image/png", data), None
+            except HTTPException as exc:
+                return None, str(exc.detail)
+            except OSError as exc:
+                return None, str(exc)
+        url = (item.url or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return None, "not a http(s) URL"
+        try:
+            page = await asyncio.to_thread(documents.fetch_page_text, url, RAW_FETCH_CHARS)
+        except Exception as exc:
+            return None, str(exc)[:200]
+        if page.get("js_rendered"):
+            return None, "JavaScript-rendered page — backend fetch got no content"
+        text = page.get("text") or ""
+        if not text.strip():
+            return None, "no extractable text"
+        title = page.get("title") or item.title or url
+        meta = {
+            "source": "context_resource",
+            "url": page.get("url") or url,
+            "mode": "summarize" if item.mode == "summarize" else "raw",
+            "title": title,
+            "truncated": bool(page.get("truncated")),
+        }
+        if meta["mode"] == "summarize" and conversation["model"]:
+            try:
+                text = await summarize_page_text(conversation["model"], title, text)
+                meta["summarized"] = True
+            except Exception as exc:
+                # Fall back to raw text — a resource that arrives beats one that doesn't.
+                meta["summarize_fallback"] = str(exc)[:120]
+        stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", title).strip()[:80] or "resource"
+        ref = store.add_attachment(
+            body.conversation_id,
+            filename=f"{stem}.txt",
+            mime="text/plain",
+            size=len(text.encode("utf-8")),
+            path="",
+            kind="document",
+            text=text,
+            meta=meta,
+        )
+        return ref, None
+
+    results = await asyncio.gather(*(one(item) for item in body.items), return_exceptions=True)
+    refs, errors = [], []
+    for i, res in enumerate(results):
+        if isinstance(res, BaseException):
+            errors.append({"url": body.items[i].url, "title": body.items[i].title, "error": str(res)[:200]})
+            continue
+        ref, err = res
+        if err:
+            errors.append({"url": body.items[i].url, "title": body.items[i].title, "error": err})
+        else:
+            refs.append(ref)
+
+    closed = store.fulfill_resource_request(body.conversation_id)
+    # Doc numbers continue the conversation's numbering — the same base the
+    # chat handler and attach_to_message use, so the [doc N] labels the model
+    # sees on the synthetic send line up with read_document.
+    doc_n = store.max_attachment_idx(body.conversation_id, "document")
+    attachments = []
+    for ref in refs:
+        if ref["kind"] == "document":
+            doc_n += 1
+            attachments.append({"id": ref["id"], "kind": "document", "doc_n": doc_n, "chars": ref["size"], "title": ref["filename"]})
+        else:
+            attachments.append({"id": ref["id"], "kind": "image", "title": ref["filename"]})
+    return {"fulfilled": True, "closed": closed, "attachments": attachments, "errors": errors}
+
+
+# --- Chat log export (/logsave) ------------------------------------------------
+
+THINK_RE = re.compile(r"<think(?:ing)?>\s*(.*?)\s*(?:</think(?:ing)?>|\Z)", re.S)
+
+
+def split_think_export(content):
+    """-> (thinking, answer). Mirrors the frontend's splitThinking for the
+    exporter: the full text is stored in content with </think> markers."""
+    m = THINK_RE.search(content or "")
+    if not m:
+        return "", content or ""
+    thinking = m.group(1).strip()
+    answer = (content[: m.start()] + content[m.end():]).strip()
+    return thinking, answer
+
+
+class ExportBody(BaseModel):
+    format: str = "md"  # md | json | txt
+
+
+@app.post("/api/conversations/{conversation_id}/export")
+async def export_conversation(conversation_id: int, body: ExportBody):
+    """Write the chat log (user/assistant/tool + thinking kept SEPARATE and
+    highlighted) to <workspace_root>/su1ra-logs/ and return the path."""
+    fmt = (body.format or "md").strip().lower().lstrip(".")
+    if fmt not in ("md", "markdown", "json", "txt"):
+        raise HTTPException(422, "format must be md, json or txt")
+    fmt = "md" if fmt == "markdown" else fmt
+    conversation = store.get_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(404, "Conversation not found")
+    messages = store.get_messages(conversation_id)
+    if not messages:
+        raise HTTPException(422, "This chat has no messages to save yet")
+
+    title = (conversation.get("title") or f"chat {conversation_id}").strip()
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    safe_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", title).strip().replace(" ", "-")[:48] or f"chat-{conversation_id}"
+
+    def role_header(role, n):
+        return {"user": "USER", "assistant": "ASSISTANT", "tool": "TOOL", "system": "SYSTEM"}.get(role, role.upper()) + f" #{n}"
+
+    if fmt == "json":
+        out = io.StringIO()
+        json.dump(
+            {
+                "title": title,
+                "conversation_id": conversation_id,
+                "model": conversation.get("model"),
+                "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "messages": [
+                    {
+                        "id": m["id"],
+                        "role": m["role"],
+                        "thinking": (split_think_export(m["content"])[0] if m["role"] == "assistant" else ""),
+                        "content": (split_think_export(m["content"])[1] if m["role"] == "assistant" else m["content"]),
+                        "tool_calls": m.get("tool_calls"),
+                        "created_at": m.get("created_at"),
+                    }
+                    for m in messages
+                ],
+            },
+            out,
+            indent=2,
+            ensure_ascii=False,
+        )
+        rendered = out.getvalue()
+        ext = "json"
+    else:
+        lines = []
+        if fmt == "md":
+            lines.append(f"# {title}\n")
+            lines.append(f"> exported {time.strftime('%Y-%m-%d %H:%M:%S')} · model: {conversation.get('model') or '(none)'}\n")
+        else:
+            lines.append(f"{title}")
+            lines.append(f"exported {time.strftime('%Y-%m-%d %H:%M:%S')} · model: {conversation.get('model') or '(none)'}")
+            lines.append("")
+        ucount = {"user": 0, "assistant": 0, "tool": 0}
+        for m in messages:
+            role = m["role"] if m["role"] in ucount else "system"
+            if role in ucount:
+                ucount[role] += 1
+                n = ucount[role]
+            else:
+                n = 0
+            thinking, answer = split_think_export(m["content"])
+            if fmt == "md":
+                lines.append(f"\n## {role_header(role, n)}\n")
+                if thinking:
+                    # highlighted: a quote block with a marker line
+                    lines.append("> **◈ thinking**\n>")
+                    lines.extend(f"> {ln}" if ln.strip() else ">" for ln in thinking.splitlines())
+                    lines.append("")
+                if answer:
+                    lines.append(answer)
+                if m.get("tool_calls"):
+                    for tc in m["tool_calls"]:
+                        fn = tc.get("function") or {}
+                        lines.append(f"\n- calls `{fn.get('name')}` with `{json.dumps(fn.get('arguments'), ensure_ascii=False)}`")
+            else:
+                lines.append(f"{'=' * 4} {role_header(role, n)} {'=' * 4}")
+                if thinking:
+                    lines.append("~~~~ thinking ~~~~")
+                    lines.append(thinking)
+                    lines.append("~~~~ answer ~~~~")
+                lines.append(answer)
+                if m.get("tool_calls"):
+                    for tc in m["tool_calls"]:
+                        fn = tc.get("function") or {}
+                        lines.append(f"[calls {fn.get('name')} {json.dumps(fn.get('arguments'), ensure_ascii=False)}]")
+                lines.append("")
+        rendered = "\n".join(lines).rstrip() + "\n"
+        ext = fmt
+
+    out_dir = workspace.root() / "su1ra-logs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{safe_stem}-{stamp}.{ext}"
+    i = 2
+    while path.exists():
+        path = out_dir / f"{safe_stem}-{stamp}-{i}.{ext}"
+        i += 1
+    path.write_text(rendered, encoding="utf-8")
+    return {"ok": True, "path": str(path), "messages": len(messages)}
 
 
 def _store_attachment(conversation_id, filename, mime, data):
@@ -1548,6 +1989,12 @@ async def chat(body: ChatRequest):
     doc_labels = []
     inline_docs = []
     deferred_docs = []
+    # Numbering continues across the whole conversation, not per message: seed
+    # from the highest idx already linked (the same query attach_to_message
+    # uses) so a second doc batch in one chat gets [doc N+1...], matching the
+    # conversation-wide order read_document reads from.
+    doc_base = store.max_attachment_idx(body.conversation_id, "document")
+    image_base = store.max_attachment_idx(body.conversation_id, "image")
     for aid in body.attachment_ids:
         ref = store.get_attachment(aid)
         # Only label attachments that are actually pending in this conversation
@@ -1556,7 +2003,7 @@ async def chat(body: ChatRequest):
         if not ref or ref["conversation_id"] != body.conversation_id or ref["message_id"] is not None:
             continue
         if ref.get("kind") == "document":
-            n = len(doc_labels) + 1
+            n = doc_base + len(doc_labels) + 1
             doc_labels.append(f"[doc {n}]")
             text = ref.get("text") or ""
             if text and len(text) <= INLINE_DOC_CHARS:
@@ -1569,7 +2016,7 @@ async def chat(body: ChatRequest):
         except OSError:
             continue
         image_b64.append(base64.b64encode(raw).decode("ascii"))
-        image_labels.append(f"[image {len(image_labels) + 1}]")
+        image_labels.append(f"[image {image_base + len(image_labels) + 1}]")
 
     prefix = " ".join(image_labels + doc_labels)
     if prefix:
@@ -1620,6 +2067,17 @@ async def chat(body: ChatRequest):
     else:
         sys_prompt = per_chat or (store.get_setting("default_system_prompt_casual") or "")
     if tools:
+        file_first = (
+            "FILE-FIRST DELIVERY (build mode — HARD RULE): the deliverable is FILES in the "
+            "project, not code in the chat. The moment you know what to build: ws_cd into a "
+            "fresh project folder (for new projects) and WRITE THE FILE(S) with ws_write "
+            "FIRST — before explaining anything. This overrides any earlier instruction to "
+            "'deliver a script' or show the code: the script IS a file on disk. When "
+            "possible run it with run_python to verify, fix, then reply with ONE short "
+            "line naming what you built and the file path. Pasting the full code into the "
+            "chat is a FAILURE — the chat carries at most a short snippet (a few lines) "
+            "when the user asks about a specific point."
+        )
         ws_rules = (
             f"Workspace: ROOT={workspace.root()} PROJECT={workspace.project_dir()}. "
             "File tools (ws_ls/read/write/edit/mkdir) resolve inside ROOT only — "
@@ -1640,15 +2098,32 @@ async def chat(body: ChatRequest):
             "call ws_ls/ws_read first — answering from memory or refusing without calling "
             "is a failure. Greetings need no tools."
         )
+        resource_rules = (
+            "REFERENCE DISCIPLINE: before writing code that uses external APIs, "
+            "libraries, or domain-specific facts you are not 100% certain about, call the "
+            "request_resources tool and ask the user for authoritative pages — exact "
+            "signatures, parameter types, initialization contracts, file format specs, "
+            "memory layouts, protocol details. Broad-but-shallow knowledge of what an API "
+            "IS is fine for identification, but exact details must come from sources the "
+            "user provides. Call it for Win32/ctypes bindings, Qt/PyQt/GTK initialization "
+            "contracts, file format specifications, memory layouts, protocol details. Do "
+            "NOT call it for pure Python stdlib work, anything verifiable by running code "
+            "(use run_python instead), or topics already covered by resources the user "
+            "provided earlier in this chat. After calling request_resources, STOP and "
+            "wait — no code, no more tools. Resources arrive as [doc N] documents and "
+            "are authoritative ground truth: never contradict them, never invent "
+            "alternative API names, parameter orders, or signatures; consult them with "
+            "read_document."
+        )
         directive = (
-            "You have file tools plus run_python. Use them proactively for computation, "
-            "running code, and file work — call them instead of guessing results. "
-            "For slide decks (.pptx), call the build_pptx tool with a structured outline "
-            "instead of writing python-pptx code — it saves the deck plus an HTML slide "
-            "preview that opens automatically in the preview pane. Same for other school "
-            "formats: build_xlsx (Excel workbooks), build_docx (Word documents) and "
-            "build_pdf (PDF handouts/worksheets) all take a structured outline and save "
-            "the file plus an auto-opening preview. " + ws_rules
+            "You have file tools plus run_python. " + file_first + " Use them proactively "
+            "for computation, running code, and file work — call them instead of guessing "
+            "results. For slide decks (.pptx), call the build_pptx tool with a structured "
+            "outline instead of writing python-pptx code — it saves the deck plus an HTML "
+            "slide preview that opens automatically in the preview pane. Same for other "
+            "school formats: build_xlsx (Excel workbooks), build_docx (Word documents) "
+            "and build_pdf (PDF handouts/worksheets) all take a structured outline and "
+            "save the file plus an auto-opening preview. " + ws_rules + " " + resource_rules
         )
         sys_prompt = f"{sys_prompt}\n\n{directive}" if sys_prompt.strip() else directive
         # Auto-context (always): the model sees the live project listing every
@@ -1669,13 +2144,15 @@ async def chat(body: ChatRequest):
                     listing = "\n".join(lines) if lines else "(empty project — ws_write to create files)"
                     sys_prompt += (
                         f"\n\n[project {workspace.active_project()} contents — "
-                        "you CAN read these with ws_read]\n" + listing
+                        "you CAN read these with ws_read]\n" + listing +
+                        "\n[reminder: deliver FILES (ws_write) — code pasted in chat is a failure]"
                     )
             else:
                 sys_prompt += (
                     "\n\n[no active project — if the user wants file work, do NOT ask them "
                     "to run commands: pick a short folder name for the project and call "
-                    "ws_cd <name> (it creates the folder and switches to it), then work]"
+                    "ws_cd <name> (it creates the folder and switches to it), then work. "
+                    "Deliver FILES via ws_write — code pasted in chat is a failure]"
                 )
         except Exception:
             pass
@@ -1868,9 +2345,21 @@ async def chat(body: ChatRequest):
                 elif name == "read_document":
                     result = None
                     result_text = read_document_slice(body.conversation_id, arguments)
+                elif name == "request_resources":
+                    result = None
+                    try:
+                        items = clean_resource_items(arguments.get("items"))
+                    except ValueError as exc:
+                        # Teaching error: the model fixes its own arguments.
+                        result = {"exit": 1}
+                        result_text = f"[request_resources rejected: {exc} — fix the arguments and call it again]"
+                    else:
+                        store.create_resource_request(body.conversation_id, items)
+                        result = {"exit": 0}
+                        result_text = format_resource_request(items)
                 else:
                     result = None
-                    result_text = f"Unknown tool: {name}. Available: run_python, ws_ls, ws_read, ws_write, ws_edit, ws_mkdir, ws_cd, build_pptx, build_xlsx, build_docx, build_pdf, read_document."
+                    result_text = f"Unknown tool: {name}. Available: run_python, ws_ls, ws_read, ws_write, ws_edit, ws_mkdir, ws_cd, build_pptx, build_xlsx, build_docx, build_pdf, read_document, request_resources."
                 row = store.add_message(body.conversation_id, "tool", result_text)
                 working.append({"role": "tool", "content": result_text})
                 yield json.dumps(
@@ -2169,6 +2658,27 @@ async def open_editor_file(path: str):
 async def editor_mkdir(body: EditorFileBody):
     target = _editor_rel_path(body.filename)
     target.mkdir(parents=True, exist_ok=True)
+    return {"ok": True, "path": str(target)}
+
+
+class EditorDeleteBody(BaseModel):
+    path: str
+
+
+@app.post("/api/editor/delete")
+async def editor_delete(body: EditorDeleteBody):
+    """Delete a scratch file or folder (the USER's explorer button — the
+    model's workspace tools still have no delete, by design)."""
+    target = _editor_rel_path(body.path)
+    root = editor_root().resolve()
+    if target == root:
+        raise HTTPException(422, "refusing to delete the scratch root")
+    if target.is_dir():
+        shutil.rmtree(target)
+    elif target.is_file():
+        target.unlink()
+    else:
+        raise HTTPException(404, f"No such file: {body.path}")
     return {"ok": True, "path": str(target)}
 
 

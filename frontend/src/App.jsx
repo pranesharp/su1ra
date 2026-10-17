@@ -22,6 +22,7 @@ const COMMANDS = [
   { cmd: '/eject', desc: 'shut down the ollama server instantly' },
   { cmd: '/connect', desc: 'start / reconnect the ollama server' },
   { cmd: '/stats', desc: 'toggle per-reply performance stats' },
+  { cmd: '/logsave', desc: 'save this chat log to <workspace>/su1ra-logs/ — /logsave [md|json|txt] (default md, thinking kept as a highlighted quote)' },
   { cmd: '/think', desc: 'thinking — /think, /think on|off|auto (this chat, persisted)' },
   { cmd: '/build', desc: 'toggle build mode — switches to the build loadout model/ctx, unloads the casual model; /build <msg> arms one message' },
   { cmd: '/casual', desc: 'switch to casual mode — everyday chat model, unloads the build model, tools off' },
@@ -121,6 +122,14 @@ export default function App() {
   const [engineVulkan, setEngineVulkan] = useState(false)
   const [settingsView, setSettingsView] = useState('split')
   const [pendingAttachments, setPendingAttachments] = useState([])
+  // Resource cart: pages gathered in the /web pane, waiting to be sent to the
+  // chat as [doc N] documents. Persisted — the cart survives restarts.
+  const [cart, setCart] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('su1ra_cart') || '[]') } catch { return [] }
+  })
+  // Open request_resources ask on the current conversation (poll-fed).
+  const [pendingRequest, setPendingRequest] = useState(null)
+  const hadPendingRef = useRef(false)
   const [visionModel, setVisionModel] = useState(false)
   const [dragActive, setDragActive] = useState(false)
   const addFilesRef = useRef(() => {})
@@ -517,10 +526,20 @@ export default function App() {
     setSelectedModel(detail.conversation.model || selectedModel)
   }
 
+  // A NEW chat always begins at the workspace root — never silently inside
+  // the last project. The model then gets /mkdir+/cd guidance and starts the
+  // next project in its own fresh folder (project rule).
+  async function resetToWorkspaceRoot() {
+    try {
+      await saveSettings({ activeProject: '' })
+    } catch { /* best effort — never block the new chat */ }
+  }
+
   async function newChat() {
     if (blocked) return
     // No system_prompt stamp — the backend resolves per-mode defaults at send
     // time. The chat is tagged with the mode it was born in.
+    await resetToWorkspaceRoot()
     const { system_prompt: _omit, ...defaults } = chatDefaultsRef.current
     const conversation = await api.createConversation({ model: selectedModel, ...defaults, code_mode: codeArmed })
     setConversations((prev) => [conversation, ...prev])
@@ -545,6 +564,7 @@ export default function App() {
   // reused instead, so toggling back and forth can't stack empty shells.
   async function startModeChat(isBuild, model, ctx) {
     if (activeConversation && messages.length === 0) {
+      await resetToWorkspaceRoot()
       const updated = await api.updateConversation(activeConversation.id, {
         code_mode: isBuild,
         ...(model ? { model } : {}),
@@ -555,6 +575,7 @@ export default function App() {
     }
     // No system_prompt stamp — the backend resolves per-mode defaults at send
     // time. The chat is tagged with the mode it was born in.
+    await resetToWorkspaceRoot()
     const { system_prompt: _omit, ...defaults } = chatDefaultsRef.current
     const conversation = await api.createConversation({
       model: model || selectedModel,
@@ -888,6 +909,25 @@ export default function App() {
       return
     }
 
+    if (cmd === '/logsave') {
+      const fmt = (arg || 'md').trim().toLowerCase().replace(/^\./, '')
+      if (!['md', 'json', 'txt'].includes(fmt)) {
+        pushSystem(`${echo}\n\n// format must be md, json or txt`)
+        return
+      }
+      if (!activeId) {
+        pushSystem(`${echo}\n\n// no open chat to save`)
+        return
+      }
+      try {
+        const res = await api.exportConversation(activeId, fmt)
+        pushSystem(`${echo}\n\n// chat log saved: ${res.path}\n// ${res.messages} messages — thinking kept as a highlighted quote` + (fmt === 'md' ? '' : ' (json: separate thinking fields)'))
+      } catch (err) {
+        pushSystem(`${echo}\n\n// logsave failed: ${err.message}`)
+      }
+      return
+    }
+
     if (cmd === '/think') {
       const mode = arg.trim().toLowerCase()
       const current = activeConversation?.think ?? chatDefaultsRef.current.think ?? null
@@ -1132,8 +1172,8 @@ export default function App() {
     // think: explicit per-chat /think wins; otherwise code mode is fixed on,
     // casual follows the loadout toggle (off by default)
     const think = activeConversation?.think ?? (codeMode ? 'on' : (loadout.casualThink === 'on' ? 'on' : 'off'))
-    let convId = activeId
-    if (!activeConversation) {
+    let convId = opts.convId || activeId
+    if (!convId && !activeConversation) {
       // Never stamp a system prompt into the new chat — the backend resolves
       // per-mode defaults at send time (build = sysp.txt, casual = its own
       // default). Tag the chat with the mode it was born in.
@@ -1303,6 +1343,13 @@ export default function App() {
     setBrowserIndex(0)
   }
 
+  // Composer resource strip: answer a pending request_resources ask — open
+  // the /web pane pre-searched (same UX as typing /web <query>).
+  function findResource(query) {
+    if (!query) return
+    openBrowser(toUrl(query, browserEngine))
+  }
+
   function browserNavigate(url) {
     url = unwrapRedirect(url)
     setBrowserHistory((prev) => [...prev.slice(0, browserIndex + 1), url])
@@ -1324,6 +1371,37 @@ export default function App() {
     }
     return () => { delete window.__su1raOpenInPane }
   }, [browserIndex])
+
+  // Cart persistence: tiny JSON blob in localStorage, best-effort.
+  useEffect(() => {
+    try { localStorage.setItem('su1ra_cart', JSON.stringify(cart)) } catch { /* storage unavailable */ }
+  }, [cart])
+
+  // Poll for a pending resource request on the open conversation (1.5s, silent
+  // on errors — a dead backend must not spam). A NEW request announces once in
+  // the chat so the user knows to reach for /web + the cart.
+  useEffect(() => {
+    hadPendingRef.current = false
+    if (!activeId) { setPendingRequest(null); return }
+    let alive = true
+    const tick = () => {
+      api
+        .getResourceRequest(activeId)
+        .then((d) => {
+          if (!alive) return
+          const pending = d && d.id ? d : null
+          setPendingRequest(pending)
+          if (pending && !hadPendingRef.current) {
+            pushSystem('// resources requested — find them with /web and add them to the cart')
+          }
+          hadPendingRef.current = !!pending
+        })
+        .catch(() => { /* backend hiccup — retry on the next tick */ })
+    }
+    tick()
+    const t = setInterval(tick, 1500)
+    return () => { alive = false; clearInterval(t) }
+  }, [activeId])
 
   function browserBack() {
     const ni = browserIndex - 1
@@ -1387,6 +1465,91 @@ export default function App() {
     }
     const header = `Summarize this web page in under ~300 words. Focus on the main points; do not reproduce it verbatim.\n\n--- ${page.title || page.url} ---\n${page.url}\n\n`
     send(header + page.text, { forceArmed: false })
+  }
+
+  // --- Resource cart --------------------------------------------------------
+  // The model's request_resources ask is answered here: collect pages in the
+  // /web pane, deliver them as [doc N] documents via a synthetic send.
+
+  function addToCart(item) {
+    setCart((prev) => {
+      if (prev.some((c) => c.url && c.url === item.url)) return prev // already carted
+      return [...prev, { mode: 'raw', kind: 'page', ...item }]
+    })
+  }
+
+  function removeCartItem(i) {
+    setCart((prev) => prev.filter((_, idx) => idx !== i))
+  }
+
+  function setCartMode(i, mode) {
+    setCart((prev) => prev.map((c, idx) => (idx === i ? { ...c, mode } : c)))
+  }
+
+  function clearCart() {
+    setCart([])
+  }
+
+  // Deliver the cart: pages -> kind="document" attachments (raw text by
+  // default), then a synthetic user message carries them into the chat. The
+  // backend's label prefix renders the [doc N] numbers — never compute them here.
+  async function sendCart() {
+    if (!cart.length || streaming) return
+    if (!selectedModel) {
+      pushSystem('// select a model first — cart kept')
+      return
+    }
+    const items = cart.map((c) => ({
+      url: c.url || '',
+      title: c.title || '',
+      mode: c.mode === 'summarize' ? 'summarize' : 'raw',
+      kind: c.kind || 'page',
+      data: c.data || '',
+    }))
+    try {
+      let convId = activeId
+      if (!convId && !activeConversation) {
+        const { system_prompt: _omit, ...defaults } = chatDefaultsRef.current
+        const conversation = await api.createConversation({ model: selectedModel, ...defaults, code_mode: codeArmed })
+        convId = conversation.id
+        setConversations((prev) => [conversation, ...prev])
+        setActiveId(convId)
+      }
+      const res = await api.cartSend(convId, items)
+      setCart([])
+      for (const e of res.errors || []) pushSystem(`// cart item failed: ${e.title || e.url}\n// ${e.error}`)
+      const extras = (res.attachments || []).map((a) => ({
+        id: a.id,
+        kind: a.kind,
+        filename: a.title,
+        url: a.kind === 'image' ? api.attachmentUrl(a.id) : null,
+        localId: a.id,
+      }))
+      if (extras.length) {
+        await send('Resources provided per your request — use read_document to consult them.', {
+          convId,
+          extraAttachments: extras,
+        })
+      } else if (!(res.errors || []).length) {
+        pushSystem('// nothing usable in the cart — nothing sent')
+      }
+    } catch (err) {
+      pushSystem(`// cart send failed: ${err.message}`)
+    }
+  }
+
+  // Skip: fulfill the pending request with nothing attached — the model is
+  // told to proceed without the material.
+  async function skipCart() {
+    if (streaming || !activeId) return
+    try {
+      await api.cartSend(activeId, [])
+      setPendingRequest(null)
+      hadPendingRef.current = false
+      await send('User declined to provide resources; proceed with what you have.')
+    } catch (err) {
+      pushSystem(`// skip failed: ${err.message}`)
+    }
   }
 
   function extractLastPythonBlock(text) {
@@ -1587,7 +1750,9 @@ export default function App() {
     }
     if (spToDefault && !codeArmed) setCasualSysp(systemPrompt)
     setStatus(await api.getStatus())
-    setAccent(newAccent)
+    // Guard: callers that don't touch the accent (e.g. the /build project
+    // reset) must not undefine the theme — applyAccent(undefined) crashes.
+    if (newAccent !== undefined) setAccent(newAccent)
     if (newBrightness !== undefined) setBgBrightness(newBrightness)
     if (newContrast !== undefined) setBgContrast(newContrast)
     if (activeConversation) {
@@ -1647,7 +1812,7 @@ export default function App() {
           </div>
         </header>
         <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} onLoadToIde={loadToIde} onRunCode={runInIde} onDownloadArtifact={downloadArtifact} onOpenArtifact={openArtifact} onOllamaReady={refreshStatus} onResendFrom={resendFrom} />
-        <Composer commands={COMMANDS} disabled={!currentModel} streaming={streaming} onSend={send} onStop={stop} codeArmed={codeArmed} vision={visionModel} attachments={pendingAttachments} onAddFiles={addFiles} onRemoveAttachment={removeAttachment} />
+        <Composer commands={COMMANDS} disabled={!currentModel} streaming={streaming} onSend={send} onStop={stop} codeArmed={codeArmed} vision={visionModel} attachments={pendingAttachments} onAddFiles={addFiles} onRemoveAttachment={removeAttachment} pendingRequest={pendingRequest} cartCount={cart.length} onFindResource={findResource} onSendCart={sendCart} onSkipCart={skipCart} />
       </main>
       {editorOpen && (
         <>
@@ -1672,6 +1837,14 @@ export default function App() {
               onBrowserEngineChange={setBrowserEngine}
               conversationId={activeId}
               onSummarize={summarizePage}
+              cart={cart}
+              pendingRequest={pendingRequest}
+              onAddToCart={addToCart}
+              onSendCart={sendCart}
+              onSkipCart={skipCart}
+              onRemoveCartItem={removeCartItem}
+              onCartMode={setCartMode}
+              onClearCart={clearCart}
             />
           ) : (
             <EditorPane

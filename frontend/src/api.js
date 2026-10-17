@@ -330,8 +330,24 @@ export async function pageSummarize(conversationId, url) {
     try {
       const errBody = await res.json()
       if (typeof errBody.detail === 'string') detail = errBody.detail
+      else if (errBody.detail) detail = JSON.stringify(errBody.detail)
     } catch {}
     throw new Error(detail)
   }
   return res.json()
 }
+
+// Resource request + cart: the model asks for reference material (poll target),
+// the user collects pages in the /web pane and delivers them as [doc N] attachments.
+export const getResourceRequest = (conversationId) =>
+  getJSON(`/api/context/resource-request?conversation_id=${encodeURIComponent(conversationId)}`)
+
+export const cartSend = (conversationId, items) =>
+  sendJSON('/api/context/cart/send', 'POST', { conversation_id: conversationId, items })
+
+// Editor explorer: delete a scratch file or folder (user-side tool).
+export const editorDelete = (path) => sendJSON('/api/editor/delete', 'POST', { path })
+
+// /logsave — write the chat log (md|json|txt) to <workspace>/su1ra-logs/.
+export const exportConversation = (conversationId, format = 'md') =>
+  sendJSON(`/api/conversations/${conversationId}/export`, 'POST', { format })

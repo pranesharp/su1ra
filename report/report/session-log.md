@@ -1802,3 +1802,151 @@ endpoint 200 with cpu/ram/disk) passes.
   `abminicpm52b:latest` is GONE — the casual-think-leak mitigation (switch casual loadout to
   a think-honouring model) may already be moot; casual loadout model setting should be
   re-checked in /settings.
+
+## 2026-10-17 — request_resources + resource cart (RAG ground-truth loop) — BUILT, awaiting click-through
+
+User's "resource request" task (prompt A) + the prior planner's verified plan (prompt B) —
+the model can now ASK the user for authoritative reference material, and the /web pane has
+a cart to deliver it. Goal: kill hallucinated API signatures/types/flags on small models by
+giving them real docs mid-build. All of prompt B's codebase claims verified against the
+working tree first; every anchor matched.
+
+- **store.py:** `resource_requests` table (conversation_id, items JSON, fulfilled_at) +
+  `create/get_pending/fulfill_resource_request`; `max_attachment_idx(conversation, kind)`.
+  **Numbering fix (user-approved):** `attach_to_message` seeds per-kind counters from
+  `MAX(idx)` of LINKED rows (was `counters = {}` per message → a SECOND doc/image batch in
+  one chat restarted at [doc 1] while read_document numbered conversation-wide → labels
+  collided); the chat handler's label math uses the same base. Also fixed
+  `get_attachments_for_conversation` ORDER BY: linked rows (idx>0) first by idx, then
+  pending (idx=0) — read_document's doc N must equal the labeled [doc N] (unlinked used to
+  sort FIRST and steal doc 1).
+- **main.py:** `request_resources` tool (7th build tool; normalize-don't-reject — single
+  dict/bare string accepted, junk dropped, clamp 10; teaching ValueError → "[request_resources
+  rejected: ...]" tool text). Dispatch branch fulfills nothing itself — it records the
+  request; the tool result teaches stop-and-wait. NEW endpoints:
+  `GET /api/context/resource-request?conversation_id=` (poll target) and
+  `POST /api/context/cart/send` — fetches each item RAW first (150k cap via
+  `documents.fetch_page_text`, concurrent, per-item errors never fail the batch;
+  js_rendered → per-item error), summarize mode = one-shot non-streaming
+  `{ollama}/api/chat` through the conversation's own model (~600 words, verbatim
+  signatures kept; ANY failure falls back to raw text + meta.summarize_fallback), stores
+  `kind="document"` + `meta.source="context_resource"` (rides the EXISTING [doc N] /
+  read_document / attach_to_message machinery — no parallel system), screenshots accepted
+  as base64 PNG image items (kind="image" → normal image path; UI button parked —
+  lowest-priority piece). Doc numbers returned from `max_attachment_idx` base so the
+  synthetic send's labels line up. Empty items = the Skip path (fulfill, nothing sent).
+  Build directive gains a REFERENCE DISCIPLINE paragraph (call request_resources for
+  external APIs/format specs/protocol details before writing code; NOT for stdlib/
+  run_python-verifiable/already-provided topics; STOP after calling; [doc N]s are
+  authoritative). sysp.txt untouched. Unknown-tool list updated.
+- **Frontend:** api.js `getResourceRequest`/`cartSend`. App.jsx: cart state (localStorage
+  `su1ra_cart`, survives restarts), 1.5s poll on activeId (silent on errors; a NEW request
+  announces once via pushSystem), `addToCart` (dedupe by URL), sendCart (creates a chat if
+  none active via a new `opts.convId` override on send() — avoids the closure-stale
+  duplicate-conversation trap, then a synthetic user message "Resources provided per your
+  request — use read_document to consult them." rides `extraAttachments`; doc numbers come
+  from the server-side label prefix, never computed client-side), skipCart (fulfill +
+  "User declined..." send). ArtifactPane (browser mode): `[ add to cart ]` beside
+  `[ summarize page ]` (summarize flow untouched), `[ in cart ]` when URL already staged;
+  cart panel below the foot (per-row raw/summarize select + remove + clear) and a
+  `! resources requested` banner listing topic/why/search_hint with send/skip actions.
+  index.css: .cart-panel/.cart-box/.cart-item/.resource-banner terminal styles.
+- **Verified:** `report/report/repro-resource-cart.py` (temp APPDATA, scripted stub
+  stream_chat + local HTTP stub for the page + the one-shot summarize): 30/30 PASS — tool
+  call through the real generator, poll endpoint, cart send (raw verbatim + summarize via
+  the conversation's model + per-item errors for refused-conn/bad-scheme + screenshot
+  image), skip path, second batch CONTINUES at [doc 3], labels [doc 1][doc 2] on the
+  synthetic message, linked idx 1,2, read_document(doc=1) returns the carted page,
+  normalize-don't-reject cases, directive present in the code-mode sysprompt.
+  `npm run build` ok (dist/assets/index-CQXm0pcq.js + index-D9feE88i.css contain the
+  cart strings). Unproven: live click-through in the desktop app (poll→banner→/web→cart→
+  send→[doc N] in a real chat) — user's step; commit waits on it per house discipline.
+  [ capture → cart ] parked (backend accepts image items already).
+
+### 2026-10-17 later — user click-through found 2 things (screenshots in .abacusai/temp)
+
+- **image (4) — model broke its tool-call template → turn "abruptly stopped":** Qwen3.8-9b
+  printed its RAW training-format tokens as CONTENT (`<|tool_call|>call:read_document[doc:1]
+  <|tool_call|><|tool_response>  Unben`) right after the stop-and-wait round trip. Ollama
+  produced no tool_calls delta; the content-fallback only accepted bare/fenced JSON → no
+  match → the loop ended the turn with the garbage as the final answer, while the model
+  believed the call succeeded and "waited for the document content" forever. FIX (backend
+  healing in detect_content_tool_call): strip leaked `<|tool_call|>`/`<|tool_response>` +
+  think markers, then scan (last match wins) for `call:NAME[k:v,...]` / `NAME({...})` /
+  `NAME(k=v)` shapes with NAME ∈ TOOLS; k:v pairs coerced (int/float/bool). The healed call
+  runs, its text is consumed (nothing ugly renders), the model gets its tool response.
+  Unknown names / plain prose never heal (39-check harness incl. 8 healing cases: ALL PASS).
+- **images (2)+(3) — "not truly convenient":** added the composer RESOURCE STRIP (Composer.jsx,
+  poll-fed pendingRequest): `! resources requested — model is waiting` with per-item
+  `[ find in /web ]` buttons (openBrowser(toUrl(hint||topic, engine)) — same UX as
+  `/web <query>`), `[ send cart (n) ]` / `[ skip ]` inline at the input. The full loop is
+  now one click each without touching the pane chrome. Rebuilt dist
+  (index-WjwYUDGt.js + index-C1jR8lXj.css). STILL awaiting user click-through.
+
+### 2026-10-17 evening — round-3 batch (user confirmed cart works "great")
+
+Four follow-ups, all verified by the extended harness (58 checks ALL PASS) + dist rebuild:
+- **snap to cart:** ArtifactPane capturePage(dest) — 'chat' (old behavior) | 'cart' (new
+  `snap to cart` button): the PNG lands in the cart as a kind:image item (title
+  `<page>-snap.png`), ships through /api/context/cart/send like any image item. Cart rows
+  show `screenshot` instead of the raw/summarize select.
+- **new chat -> workspace root:** newChat() + startModeChat (BOTH branches: fresh create and
+  empty-chat retag) call resetToWorkspaceRoot() = saveSettings({activeProject: ''}) — a new
+  chat never begins inside the last project; the model gets the /mkdir+/cd guidance instead.
+- **editor delete:** POST /api/editor/delete {path} (validated by _editor_rel_path; root
+  refused, traversal refused, dirs = shutil.rmtree) + per-row `−` button in the scratch
+  explorer (two-click confirm: − -> `sure?` — window.confirm is unreliable in webviews).
+  Deleting the open file resets the buffer to untitled.py. USER-side tool only — the
+  model's workspace tools still have no delete (by design).
+- **/logsave [md|json|txt]:** POST /api/conversations/{id}/export — writes
+  <workspace_root>/su1ra-logs/<title>-<stamp>.<ext>. md: ## USER/ASSISTANT/TOOL #n headers,
+  thinking rendered as a highlighted `> **◈ thinking**` quote block; json: `thinking` as its
+  own field per message; txt: ~~~~ thinking ~~~~ / ~~~~ answer ~~~~ sections. Think split =
+  THINK_RE server-side (mirrors splitThinking; NOTE: never spell a literal think opener in
+  agent tool calls — the pipeline eats it; concatenate "<"+"think>").
+- **filled buttons:** .btn-solid (+ .ghost/.done) replaces [ bracket ] chrome on the NEW
+  surfaces: scratch explorer (+file/+dir), browser foot (summarize page / snap to cart /
+  add to cart), composer resource strip, cart panel. Pre-existing pane chrome
+  (editor head save/copy/run/close etc.) untouched — say the word to roll it app-wide.
+- GOTCHA hit: editor_root() is ~/Documents/.scratch, NOT workspace-root-relative — the
+  harness monkeypatches main.editor_root into the temp dir (first run wrote del-me into the
+  real scratch; cleaned up).
+
+### 2026-10-17 night — BLACK SCREEN after /build: root-caused + fixed (reproduced in a real browser)
+
+User hit a full blackout on /build. Repro'd on a throwaway backend (:8011, temp APPDATA) +
+bundled ollama via the browser MCP: `Uncaught TypeError: Cannot read properties of undefined
+(reading 'slice')` → React unmounts → the near-black body bg is all that's left.
+- ROOT CAUSE (pre-existing landmine, `git show HEAD` confirms the line is old): the
+  component's `saveSettings` called **`setAccent(newAccent)` UNCONDITIONALLY** — every
+  caller until now passed an accent (SettingsModal), so it never fired. My
+  resetToWorkspaceRoot() is the FIRST no-accent caller on the /build path → setAccent
+  (undefined) → the `[accent]` effect re-runs → applyAccent(undefined) → hexToRgb
+  `hex.slice(1)` throws.
+- Timing gotcha: the crash needs ollama REACHABLE — `setStatus(await api.getStatus())`
+  throws before setAccent when the engine is down, so a dead ollama masks the bug. That's
+  why it looked like /build "sometimes" killed the app.
+- FIX (both layers): `if (newAccent !== undefined) setAccent(newAccent)` (matches the
+  neighboring brightness/contrast guards) + `applyAccent`: `hex = hex || DEFAULT_ACCENT`
+  (defense in depth — theme.js now tolerates a falsy hex everywhere).
+- VERIFIED in the served UI (minified dist, model Qwen3.8-9b selected, ollama up):
+  /build → /casual → /build → /newchat — zero errors, app alive, active_project reset to ''
+  (the workspace-root fix works too). GOTCHA for browser repro: the webview caches
+  index.html — a reload can serve the OLD bundle; cache-bust with ?v=N and check the asset
+  hash. taskkill //F gets slash-mangled by the POSIX shell — use PowerShell Stop-Process.
+
+### 2026-10-17 late — "stop pasting code in chat": FILE-FIRST delivery rule (build mode)
+
+User frustration: build-mode models dump full code blocks in chat instead of writing files
+into the project. Levers (prompt-level, appended directive only — sysp.txt SACRED/untouched):
+- `file_first` HARD RULE now OPENS the build directive: deliverable = FILES; ws_cd + ws_write
+  FIRST, before explaining; explicitly overrides sysp.txt's "deliver a runnable script"
+  phrasing (the script IS a file); run to verify via run_python; reply = ONE line
+  (what + path); full code in chat = FAILURE (chat snippets ≤ a few lines only when the
+  user asks about a specific point).
+- Per-turn auto-context injection (the part small models actually re-read every turn) now
+  ends with `[reminder: deliver FILES (ws_write) — code pasted in chat is a failure]` —
+  BOTH branches (project listing + no-active-project guidance).
+- Harness +2 checks (61 total, ALL PASS): FILE-FIRST + reminder present in the effective
+  code-mode sysprompt. Real-model behavior check (does Qwen3.8 actually comply) = user's
+  click-through.

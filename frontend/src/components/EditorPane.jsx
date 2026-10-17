@@ -163,6 +163,8 @@ export default function EditorPane({ width, code, filename, onCodeChange, onFile
   const [explorerOpen, setExplorerOpen] = useState(true)
   const [tree, setTree] = useState(null)
   const [expanded, setExpanded] = useState(() => new Set())
+  // two-click delete confirm (window.confirm is unreliable in webview shells)
+  const [confirmDel, setConfirmDel] = useState(null)
   const controllerRef = useRef(null)
   const gutterRef = useRef(null)
   const outRef = useRef(null)
@@ -351,6 +353,26 @@ export default function EditorPane({ width, code, filename, onCodeChange, onFile
     }
   }
 
+  async function deleteEntry(rel, isDir) {
+    try {
+      await api.editorDelete(rel)
+      setConfirmDel(null)
+      await refreshTree()
+      // deleting the open file: drop the buffer back to a fresh scratch
+      if (!isDir && rel === filename) {
+        onFilenameChange('untitled.py')
+        onCodeChange('')
+        setSnapshot('')
+        setSaveMark(`deleted ${rel}`)
+        setTimeout(() => setSaveMark(null), 2500)
+      }
+    } catch (err) {
+      setSaveMark(`delete failed: ${err.message}`)
+      setConfirmDel(null)
+      setTimeout(() => setSaveMark(null), 3500)
+    }
+  }
+
   function renderTree(node, relBase) {
     const rows = []
     for (const d of node.dirs || []) {
@@ -360,6 +382,16 @@ export default function EditorPane({ width, code, filename, onCodeChange, onFile
         <div key={`d-${rel}`} className="explorer-row dir" onClick={() => toggleDir(rel)}>
           <span className="explorer-twist">{open ? '▾' : '▸'}</span>
           <span className="explorer-name">{d.name}/</span>
+          <button
+            className={`explorer-del${confirmDel === rel ? ' armed' : ''}`}
+            title={confirmDel === rel ? `click again to delete ${rel}/` : `delete ${rel}/`}
+            onClick={(e) => {
+              e.stopPropagation()
+              confirmDel === rel ? deleteEntry(rel, true) : setConfirmDel(rel)
+            }}
+          >
+            {confirmDel === rel ? 'sure?' : '−'}
+          </button>
         </div>,
       )
       if (open) {
@@ -381,6 +413,16 @@ export default function EditorPane({ width, code, filename, onCodeChange, onFile
         >
           <span className="explorer-twist" />
           <span className="explorer-name">{f.name}</span>
+          <button
+            className={`explorer-del${confirmDel === rel ? ' armed' : ''}`}
+            title={confirmDel === rel ? `click again to delete ${rel}` : `delete ${rel}`}
+            onClick={(e) => {
+              e.stopPropagation()
+              confirmDel === rel ? deleteEntry(rel, false) : setConfirmDel(rel)
+            }}
+          >
+            {confirmDel === rel ? 'sure?' : '−'}
+          </button>
         </div>,
       )
     }
@@ -683,11 +725,11 @@ export default function EditorPane({ width, code, filename, onCodeChange, onFile
             <span className="panel-title">scratch</span>
             <Corners />
             <div className="explorer-head">
-              <button className="explorer-btn" onClick={newFile} title="new file">
-                [+file]
+              <button className="btn-solid" onClick={newFile} title="new file">
+                + file
               </button>
-              <button className="explorer-btn" onClick={newFolder} title="new folder">
-                [+dir]
+              <button className="btn-solid" onClick={newFolder} title="new folder">
+                + dir
               </button>
             </div>
             <div className="explorer-tree">

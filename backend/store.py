@@ -93,6 +93,14 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
             CREATE INDEX IF NOT EXISTS idx_attachments_conversation ON attachments(conversation_id);
+            CREATE TABLE IF NOT EXISTS resource_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                items TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                fulfilled_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_resource_requests_conversation ON resource_requests(conversation_id);
             """
         )
         columns = [r["name"] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()]
@@ -380,11 +388,14 @@ def add_attachment(conversation_id, filename, mime, size, path, kind="image", te
 
 
 def get_attachments_for_conversation(conversation_id):
-    """All attachments in a conversation, ordered by their per-chat idx."""
+    """All attachments in a conversation — LINKED rows first in their per-chat
+    idx order (the numbers the model saw as [doc N] / [image N]), then still-
+    pending rows (idx=0) in insertion order. read_document_slice numbers
+    documents from this list, so its doc N must equal the labeled [doc N]."""
     with _connect() as conn:
         rows = conn.execute(
             "SELECT id, message_id, filename, mime, size, idx, kind, meta FROM attachments "
-            "WHERE conversation_id = ? ORDER BY idx, id",
+            "WHERE conversation_id = ? ORDER BY (idx = 0), idx, id",
             (conversation_id,),
         ).fetchall()
         return [_attachment_dict(r) for r in rows]
@@ -409,7 +420,10 @@ def get_attachment(attachment_id):
 def attach_to_message(attachment_ids, message_id, conversation_id):
     """Link pending attachments to a sent message, assigning a per-kind,
     per-conversation idx (1-based, in the order given) so [image N] / [doc N]
-    numbering restarts each conversation and never mixes the two kinds."""
+    numbering is per-conversation and never mixes the two kinds. Counters are
+    seeded from the highest idx already linked in the chat, so a SECOND batch
+    of docs/images continues the numbers — read_document lists documents
+    conversation-wide and would otherwise collide across batches."""
     if not attachment_ids:
         return []
     with _connect() as conn:
@@ -418,7 +432,14 @@ def attach_to_message(attachment_ids, message_id, conversation_id):
             (conversation_id,),
         ).fetchall()
         kind_of = {r["id"]: (r["kind"] or "image") for r in rows}
-        counters = {}
+        counters = {
+            (r["kind"] or "image"): (r["m"] or 0)
+            for r in conn.execute(
+                "SELECT kind, MAX(idx) AS m FROM attachments "
+                "WHERE conversation_id = ? AND message_id IS NOT NULL GROUP BY kind",
+                (conversation_id,),
+            ).fetchall()
+        }
         linked = []
         for aid in attachment_ids:
             if aid not in kind_of:
@@ -431,6 +452,68 @@ def attach_to_message(attachment_ids, message_id, conversation_id):
             )
             linked.append(aid)
         return linked
+
+
+def max_attachment_idx(conversation_id, kind):
+    """Highest per-conversation idx already linked for a kind (0 when none).
+    The single source of truth for where the next [doc N] / [image N] starts —
+    the chat handler's label math and attach_to_message's counters both use it
+    so labels and stored idx can never drift apart."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT MAX(idx) AS m FROM attachments "
+            "WHERE conversation_id = ? AND kind = ? AND message_id IS NOT NULL",
+            (conversation_id, kind),
+        ).fetchone()
+        return (row["m"] or 0) if row else 0
+
+
+# --- Resource requests (request_resources tool + the /web cart) ---------------
+
+def _resource_request_dict(row):
+    return {
+        "id": row["id"],
+        "conversation_id": row["conversation_id"],
+        "items": json.loads(row["items"]) if row["items"] else [],
+        "created_at": row["created_at"],
+        "fulfilled_at": row["fulfilled_at"],
+    }
+
+
+def create_resource_request(conversation_id, items):
+    """Record a pending request_resources ask. items: list of {topic, why, search_hint?}."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            "INSERT INTO resource_requests (conversation_id, items) VALUES (?, ?)",
+            (conversation_id, json.dumps(items)),
+        )
+        row = conn.execute(
+            "SELECT id, conversation_id, items, created_at, fulfilled_at FROM resource_requests WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        return _resource_request_dict(row)
+
+
+def get_pending_resource_request(conversation_id):
+    """The conversation's latest un-fulfilled resource request, or None."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT id, conversation_id, items, created_at, fulfilled_at FROM resource_requests "
+            "WHERE conversation_id = ? AND fulfilled_at IS NULL ORDER BY id DESC LIMIT 1",
+            (conversation_id,),
+        ).fetchone()
+        return _resource_request_dict(row) if row else None
+
+
+def fulfill_resource_request(conversation_id):
+    """Close every open resource request in a conversation. Returns count closed."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE resource_requests SET fulfilled_at = datetime('now') "
+            "WHERE conversation_id = ? AND fulfilled_at IS NULL",
+            (conversation_id,),
+        )
+        return cursor.rowcount
 
 
 def delete_attachment_files_for_conversation(conversation_id):

@@ -84,6 +84,33 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
 
 - Tools offered ONLY when `body.tools and body.code_mode` — **strict server-side
   gating**; the old ```python auto-arm in casual was removed.
+- **Off-template tool-call healing (2026-10-17):** small models sometimes break their own
+  tool-call template and leak raw tokens as content (`<|tool_call|>call:read_document[doc:1]
+  <|tool_response>`) — Ollama parses no tool_calls, the old content-fallback only accepted
+  bare JSON, so the turn ended as garbage and the model waited forever for a tool response
+  that never came. `detect_content_tool_call` now strips the leaked tokens/think markers and
+  heals `call:NAME[k:v]` / `NAME({json})` / `NAME(k=v)` shapes (NAME must be a real tool;
+  last match wins) so the tool runs and the loop continues.
+- **request_resources (2026-10-17, 7th tool):** build-mode RAG loop — when the model
+  needs authoritative ground truth (exact API signatures/types/flags, format specs,
+  protocol details) it calls `request_resources` (items: topic/why/search_hint;
+  normalize-don't-reject, clamp 10), the backend records a pending request, and the tool
+  result teaches STOP-AND-WAIT. The user answers via the **resource cart** (see /web
+  section); pages arrive as `kind="document"` attachments (`meta.source="context_resource"`)
+  on a synthetic user message, so the EXISTING [doc N] labeling + `read_document` +
+  `attach_to_message` all apply unchanged. `GET /api/context/resource-request?conversation_id=`
+  = poll target; `POST /api/context/cart/send` = deliver (items[] raw|summarize + optional
+  base64 image items; summarize = one-shot non-streaming `{ollama}/api/chat` on the
+  conversation's model, falls back to raw on ANY failure; per-item errors never fail the
+  batch; raw cap 150k; empty items = Skip). Directive gains a REFERENCE DISCIPLINE
+  paragraph (build mode only; sysp.txt untouched). Harness:
+  `report/report/repro-resource-cart.py` (30 checks, temp APPDATA).
+- **Attachment numbering is per-CONVERSATION (2026-10-17 fix):** `attach_to_message`
+  seeds per-kind counters from `MAX(idx)` of linked rows (`store.max_attachment_idx`) and
+  the chat handler's label math uses the same base — a second doc/image batch in one chat
+  CONTINUES at [doc N+1] (per-message restart used to collide with read_document's
+  conversation-wide numbering). `get_attachments_for_conversation` orders linked rows
+  (idx>0) first, pending (idx=0) last, so read_document's doc N == the labeled [doc N].
 - 6 workspace tools registered (ws_ls/ws_read/ws_write/ws_edit/ws_mkdir/ws_cd);
   `run_python` cwd = active project dir.
 - **Project rule (2026-10-13):** the model starts every new project in a NEW
@@ -108,6 +135,15 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
   the turn.
 - `/mkdir <name>` + `/cd <name>` commands; `workspace_root` + `active_project` in
   settings GET/PATCH with validation; `/api/workspace/mkdir|read|ls`.
+- **New chats start at the workspace root (2026-10-17):** `newChat()`/`startModeChat`
+  (both branches) reset `active_project` to '' first — a fresh chat never begins inside
+  the last project; the model re-derives /mkdir+/cd guidance. Opening an OLD chat does
+  NOT touch the project.
+- **/logsave [md|json|txt] (2026-10-17):** `POST /api/conversations/{id}/export` writes
+  `<workspace_root>/su1ra-logs/<title>-<stamp>.<ext>` — md: `## USER/ASSISTANT/TOOL #n`
+  + thinking as a highlighted `> **◈ thinking**` quote; json: per-message `thinking`
+  field; txt: ~~~~ thinking/answer ~~~~ sections. User-facing command; the model never
+  calls it.
 - Model `.html` writes/edits in workspace mode auto-open/refresh the artifact
   preview with a `// preview:` line.
 - Out-of-bounds ops = hard deny + the model explains in text. Approval popup is a
@@ -158,6 +194,15 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
   stack) keeps powering the visible page regardless.
 - Known limits: in-iframe navigation isn't tracked (summarize uses the last
   pane-level URL); Google/Brave/DDG refuse framing.
+- **Resource cart (2026-10-17):** `[ add to cart ]` beside `[ summarize page ]` stages the
+  page (dedupe by URL; per-row raw/summarize select; cart persists in localStorage
+  `su1ra_cart`). When the model's `request_resources` ask is pending (1.5s poll in
+  App.jsx), a **composer resource strip** lists the topics with `[ find in /web ]` buttons
+  (opens the pane pre-searched, same as `/web <query>`), `[ send cart (n) ]` / `[ skip ]`
+  at the input — the loop is one click each without touching pane chrome. Send =
+  `POST /api/context/cart/send` → pages stored as [doc N] documents → synthetic
+  "Resources provided per your request…" user message. Skip = fulfill + "User declined…".
+  `snap to cart` screenshots the pane INTO the cart (kind:image; capturePage(dest)).
 - **Pane divider drag:** `onPointerDown` (NOT onMouseDown — pointer capture needs a
   pointerId), `body.pane-resizing` disables iframe/pane pointer events during drag,
   width clamped to `[280, min(1200, innerWidth - 360)]`.
@@ -254,6 +299,14 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
 
 ## CSS gotchas (hit before)
 
+- **`setAccent` guard (2026-10-17, black-screen class of bug):** the component
+  `saveSettings` must NEVER `setAccent(newAccent)` unconditionally — a caller without
+  `accent:` (e.g. the /build project reset) undefines the theme, the `[accent]` effect
+  runs `applyAccent(undefined)` → `hexToRgb(undefined).slice` throws → React unmounts →
+  near-black empty window. Guarded + `applyAccent` falls back to `DEFAULT_ACCENT`.
+  Note: a DOWN ollama masks it (`getStatus()` throws first). Suspect this class when the
+  app shows the bare black body.
+
 - `.modal input { width: 100% }` out-specifies single-class rules — any new input
   inside the modal needs a `.modal`-scoped override or it stretches and crushes
   flex siblings (broke the ctx slider once; commit 0d65371).
@@ -267,7 +320,7 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
 /help · /models (+ `pull <name>`, `get [query]`) · /chats · /delchat (<n|id>, `all`
 wipes everything) · /clear (current chat messages only, chat + settings kept) ·
 /newchat · /build (toggle; `<msg>` one-shot; /code hidden alias) · /casual · /modes · /mkdir · /cd ·
-/settings · /stats · /editor (/ide alias) · /eject · /connect · /web <url|query>
+/settings · /stats · /logsave [md|json|txt] · /editor (/ide alias) · /eject · /connect · /web <url|query>
 
 ## Editor pane (2026-10-15 — renamed from /ide, general-purpose)
 
@@ -277,10 +330,17 @@ wipes everything) · /clear (current chat messages only, chat + settings kept) �
   PARENT dir (sibling imports), save auto-creates parents. `/api/editor/open`
   reads a file back into the buffer (400k cap; `rel` is `as_posix()`), 
   `/api/editor/tree` = recursive listing (depth 5, 800 entries), 
-  `/api/editor/mkdir` makes folders or empty files. Frontend: CodeMirror 6
+  `/api/editor/mkdir` makes folders or empty files. **`/api/editor/delete`
+  (2026-10-17) = user-side file/dir delete (rmtree for dirs; traversal + root
+  refused)** — the model's workspace tools still have NO delete, by design.
+  Frontend: per-row `−` (two-click confirm − -> `sure?`; native confirm() is
+  unreliable in webviews); deleting the open file resets the buffer.
+  Filled `.btn-solid` action buttons (+ .ghost/.done variants) on the NEW
+  surfaces (explorer head, browser foot, resource strip, cart) — pane chrome
+  keeps the [ bracket ] style. CodeMirror 6
   (basicSetup + per-ext lang; theme Compartment follows data-mode; Mod-s
-  keymap + window ctrl+s), explorer sidebar (open / [+file] / [+dir]),
-  dirty = `code !== snapshot` → `· unsaved` marker. run() reads `codeRef`.
+  keymap + window ctrl+s), explorer sidebar (open / +file / +dir / row
+  delete), dirty = `code !== snapshot` → `· unsaved` marker. run() reads `codeRef`.
 - `/editor` toggles the right pane (hidden `/ide` alias kept). Settings keys
   STAY `ide_open`/`ide_width` (DB compat — same precedent as `code_mode`).
   Component: `EditorPane.jsx`; state editorOpen/editorWidth/editorCode/editorName.

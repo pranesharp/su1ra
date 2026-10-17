@@ -54,6 +54,11 @@ export default function Composer({
   attachments = [],
   onAddFiles,
   onRemoveAttachment,
+  pendingRequest,
+  cartCount = 0,
+  onFindResource,
+  onSendCart,
+  onSkipCart,
 }) {
   const [text, setText] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -142,6 +147,39 @@ export default function Composer({
 
   return (
     <div className="composer-wrap">
+      {pendingRequest && (
+        <div className="resource-strip">
+          <div className="resource-strip-head">! resources requested — model is waiting</div>
+          <ul className="resource-strip-items">
+            {pendingRequest.items.map((it, i) => (
+              <li key={i} className="resource-strip-item">
+                <span className="rs-topic" title={[it.why, it.search_hint].filter(Boolean).join(' · ') || it.topic}>
+                  {it.topic}
+                </span>
+                <button
+                  className="btn-solid"
+                  title={it.why ? `find: ${it.search_hint || it.topic}` : 'open the browser pane with this search'}
+                  onClick={() => onFindResource?.(it.search_hint || it.topic)}
+                >
+                  find in /web
+                </button>
+              </li>
+            ))}
+          </ul>
+          <div className="resource-strip-actions">
+            {cartCount > 0 ? (
+              <button className="btn-solid" onClick={onSendCart}>
+                send cart ({cartCount})
+              </button>
+            ) : (
+              <span className="rs-note">// cart empty — find above, then add to cart in the pane</span>
+            )}
+            <button className="btn-solid ghost" title="decline — the model proceeds without the material" onClick={onSkipCart}>
+              skip
+            </button>
+          </div>
+        </div>
+      )}
       {streaming && <SineWave />}
       {attachments.length > 0 && (
         <div className="attach-strip">
