@@ -23,10 +23,15 @@ def base_url():
 def engine_env():
     """Extra env for a server Su1ra spawns, from the `engine` setting.
 
-    - auto: no overrides (Ollama picks; note it drops iGPUs unless asked).
-    - cpu: hide every GPU backend -> CPU inference.
-    - gpu: keep auto-detect but stop dropping integrated GPUs; Vulkan itself
-      is only forced when `engine_vulkan` is on (experimental, Intel/XPU).
+    - auto/gpu: two independent hard switches (settings engine_vulkan /
+      engine_igpu — on -> "1", off -> "0"), because stock 0.40.x defaults
+      betray both sides: Vulkan runner libs are loaded by DEFAULT (unchecked
+      would silently stay on) while Vulkan iGPUs are DENIED by default
+      (discover.integratedGPUAllowedByDefault allows only CUDA + whitelisted
+      ROCm GFX), so the old unconditional OLLAMA_IGPU_ENABLE=1 in gpu mode
+      invited an integrated GPU to take the model away from a discrete card
+      (RX 580 + Arrow-Lake iGPU case, 2026-10-19). Ticked = eligible, unticked
+      = excluded. cpu: hide every GPU backend -> CPU inference.
     """
     engine = (get_setting("engine") or "auto").strip().lower()
     if engine == "cpu":
@@ -37,12 +42,10 @@ def engine_env():
             "OLLAMA_VULKAN": "0",
             "GGML_VK_VISIBLE_DEVICES": "-1",
         }
-    if engine == "gpu":
-        env = {"OLLAMA_IGPU_ENABLE": "1"}
-        if get_setting("engine_vulkan") == "1":
-            env["OLLAMA_VULKAN"] = "1"
-        return env
-    return {}
+    return {
+        "OLLAMA_VULKAN": "1" if get_setting("engine_vulkan") == "1" else "0",
+        "OLLAMA_IGPU_ENABLE": "1" if get_setting("engine_igpu") == "1" else "0",
+    }
 
 
 def _run_capture(cmd, timeout=8):
@@ -458,6 +461,12 @@ async def list_models():
 
 
 def normalize_think_param(think):
+    """-> None | bool | "low" | "medium" | "high" for the Ollama payload.
+
+    off -> false · on/ultra -> true (uncapped) · low/med/medium/high -> the
+    level string (only level-honoring templates budget it; a bool-only
+    template treats the string as truthy = plain on). auto/empty -> None
+    (the field is omitted, model default)."""
     if think is None:
         return None
     if isinstance(think, bool):
@@ -465,11 +474,13 @@ def normalize_think_param(think):
     text = str(think).strip().lower()
     if text in ("", "auto", "default", "none"):
         return None
-    if text in ("on", "true", "1"):
-        return True
     if text in ("off", "false", "0"):
         return False
-    if text in ("low", "medium", "high", "max"):
+    if text in ("on", "true", "1", "ultra", "max"):
+        return True
+    if text == "med":
+        return "medium"
+    if text in ("low", "medium", "high"):
         return text
     return None
 
@@ -488,8 +499,9 @@ def friendly_load_error(text):
     return None
 
 
-async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ctx=0, tools=None, think=None):
-    base = base_url()
+def chat_payload(model, messages, system_prompt="", temperature=0.7, num_ctx=0, tools=None, think=None, keep_alive="30m"):
+    """The /api/chat request body for stream_chat — factored out pure so the
+    harness can assert on it (keep_alive, think mapping, num_ctx)."""
     payload_messages = (
         [{"role": "system", "content": system_prompt}] if system_prompt.strip() else []
     ) + messages
@@ -501,12 +513,22 @@ async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ct
         "messages": payload_messages,
         "stream": True,
         "options": options,
+        # Stay resident across a build session: the default 5m idle unload
+        # means every turn after a >5min think/read pays a full model reload
+        # from disk. Mode switches still evict explicitly (unloadInBackground).
+        "keep_alive": keep_alive,
     }
     think_param = normalize_think_param(think)
     if think_param is not None:
         payload["think"] = think_param
     if tools:
         payload["tools"] = tools
+    return payload
+
+
+async def stream_chat(model, messages, system_prompt="", temperature=0.7, num_ctx=0, tools=None, think=None):
+    base = base_url()
+    payload = chat_payload(model, messages, system_prompt, temperature, num_ctx, tools, think)
     t0 = time.perf_counter()
     ttft = None
     t_first_content = None

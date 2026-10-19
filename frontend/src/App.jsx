@@ -23,7 +23,8 @@ const COMMANDS = [
   { cmd: '/connect', desc: 'start / reconnect the ollama server' },
   { cmd: '/stats', desc: 'toggle per-reply performance stats' },
   { cmd: '/logsave', desc: 'save this chat log to <workspace>/su1ra-logs/ — /logsave [md|json|txt] (default md, thinking kept as a highlighted quote)' },
-  { cmd: '/think', desc: 'thinking — /think, /think on|off|auto (this chat, persisted)' },
+  { cmd: '/think', desc: 'thinking ladder — /think off|low|med|high|ultra (this chat, persisted) · bare /think shows all levels' },
+  { cmd: '/rename', desc: 'name the current chat — /rename <title> · a manual name is never overwritten by auto-title' },
   { cmd: '/build', desc: 'toggle build mode — switches to the build loadout model/ctx, unloads the casual model; /build <msg> arms one message' },
   { cmd: '/casual', desc: 'switch to casual mode — everyday chat model, unloads the build model, tools off' },
   { cmd: '/modes', desc: 'show current mode — casual/build plus model, ctx, think, tools' },
@@ -33,6 +34,28 @@ const COMMANDS = [
   { cmd: '/preview', desc: 'generate + open a preview for a project file — /preview <name.pptx|xlsx|docx|pdf|svg>' },
   { cmd: '/web', desc: 'open the browser pane — /web <url or search query> (search uses the selected engine)' },
 ]
+
+// Thinking ladder — canonical values are the backend's (store.THINK_VALUES):
+// off/low/medium/high/on, where on = uncapped and low..high are reasoning
+// budgets honored by level-aware model templates (gpt-oss family). UI words:
+// medium shows as 'med', on shows as 'ultra'. A per-chat 'auto' is stored as
+// null and falls through to the mode's loadout default at send time.
+const THINK_LADDER = [
+  ['off', 'off', 'no reasoning — fastest, saves context'],
+  ['low', 'low', 'brief reasoning budget'],
+  ['medium', 'med', 'moderate budget — build default'],
+  ['high', 'high', 'large budget'],
+  ['on', 'ultra', 'uncapped reasoning (the old on)'],
+]
+const THINK_ALIASES = {
+  off: 'off', false: 'off', 0: 'off',
+  low: 'low',
+  med: 'medium', medium: 'medium',
+  high: 'high',
+  ultra: 'on', on: 'on', max: 'on', true: 'on', 1: 'on',
+}
+const thinkLabel = (v) => (v == null || v === 'auto' ? 'auto' : THINK_LADDER.find(([k]) => k === v)?.[1] || v)
+const thinkNote = (v) => THINK_LADDER.find(([k]) => k === v)?.[2] || 'model default (no override)'
 
 const STARTER_CODE = `# scratch.py — lives in ~/Documents/.scratch
 # rename it (e.g. notes.md, run.js) — the extension picks the interpreter
@@ -117,9 +140,10 @@ export default function App() {
   const [casualSysp, setCasualSysp] = useState('')
   const [sandboxTools, setSandboxTools] = useState(true)
   const [sandboxBackend, setSandboxBackend] = useState('auto')
-  const [loadout, setLoadout] = useState({ casualModel: '', codeModel: '', casualCtx: 0, codeCtx: 0, casualThink: 'off' })
+  const [loadout, setLoadout] = useState({ casualModel: '', codeModel: '', casualCtx: 0, codeCtx: 0, casualThink: 'off', codeThink: 'medium' })
   const [engine, setEngine] = useState('auto')
   const [engineVulkan, setEngineVulkan] = useState(false)
+  const [engineIgpu, setEngineIgpu] = useState(false)
   const [settingsView, setSettingsView] = useState('split')
   const [pendingAttachments, setPendingAttachments] = useState([])
   // Resource cart: pages gathered in the /web pane, waiting to be sent to the
@@ -439,18 +463,23 @@ export default function App() {
       // Casual falls back to the legacy default for users upgrading.
       const casualCtx = settingsRes.loadout_casual_ctx || settingsRes.default_context_length || 0
       const codeCtx = settingsRes.loadout_code_ctx || 0
-      // casual think: loadout toggle wins, legacy default_think migrates, fresh installs get off
-      const casualThink = (settingsRes.loadout_casual_think || settingsRes.default_think) === 'on' ? 'on' : 'off'
+      // think levels: canonical off/low/medium/high/on · casual falls back to
+      // the legacy default_think for users upgrading, fresh installs get off ·
+      // build gets its own default (med — budgets reasoning on aware models)
+      const casualThink = settingsRes.loadout_casual_think || settingsRes.default_think || 'off'
+      const codeThink = settingsRes.loadout_code_think || 'medium'
       setLoadout({
         casualModel: settingsRes.loadout_casual_model || '',
         codeModel: settingsRes.loadout_code_model || '',
         casualCtx,
         codeCtx,
         casualThink,
+        codeThink,
       })
       setSettingsView(settingsRes.settings_view === 'list' ? 'list' : 'split')
       setEngine(['auto', 'cpu', 'gpu'].includes(settingsRes.engine) ? settingsRes.engine : 'auto')
       setEngineVulkan(settingsRes.engine_vulkan === true)
+      setEngineIgpu(settingsRes.engine_igpu === true)
       setCasualSysp(settingsRes.default_system_prompt_casual || '')
       chatDefaultsRef.current = {
         system_prompt: settingsRes.default_system_prompt || '',
@@ -642,7 +671,7 @@ export default function App() {
     setCodeArmed(false)
     const conversation = await startModeChat(false, casualModel, newCtx)
     pushSystem(
-      `${echo}\n\n// casual mode — new chat #${conversation.id} · model ${casualModel || '(unchanged)'} · ctx ${newCtx} · think ${loadout.casualThink === 'on' ? 'on' : 'off'} · tools off`,
+      `${echo}\n\n// casual mode — new chat #${conversation.id} · model ${casualModel || '(unchanged)'} · ctx ${newCtx} · think ${thinkLabel(loadout.casualThink || 'off')} · tools off`,
     )
   }
 
@@ -861,6 +890,26 @@ export default function App() {
       return
     }
 
+    if (cmd === '/rename') {
+      if (!activeId || !activeConversation) {
+        pushSystem(`${echo}\n\n// no chat open — /rename names the current chat`)
+        return
+      }
+      const name = arg.trim()
+      if (!name) {
+        pushSystem(
+          `${echo}\n\n// usage: /rename <title> — names this chat (blocks AI auto-title)\n// current: ${activeConversation.title || '(untitled — auto-titled after the first exchange)'}`,
+        )
+        return
+      }
+      const updated = await api.updateConversation(activeId, { title: name.slice(0, 80) })
+      if (updated) {
+        setConversations((prev) => prev.map((c) => (c.id === activeId ? updated : c)))
+        pushSystem(`${echo}\n\n// renamed: ${activeConversation.title || '(untitled)'} → ${updated.title}`)
+      }
+      return
+    }
+
     if (cmd === '/settings') {
       // settings mount from DB truth — never open on stale pre-boot state,
       // or an early save could wipe persisted values with empties
@@ -931,20 +980,30 @@ export default function App() {
     if (cmd === '/think') {
       const mode = arg.trim().toLowerCase()
       const current = activeConversation?.think ?? chatDefaultsRef.current.think ?? null
-      let next = null
       if (!mode) {
-        next = current === 'off' ? 'on' : current === 'on' ? 'off' : 'on'
-      } else if (['on', 'true', '1'].includes(mode)) {
-        next = 'on'
-      } else if (['off', 'false', '0'].includes(mode)) {
-        next = 'off'
-      } else if (['auto', 'default', 'none'].includes(mode)) {
-        next = 'auto'
-      } else {
-        pushSystem(`${echo}\n\n// usage: /think [on|off|auto] — e.g. /think off`)
+        // Menu: every level with the current one marked — one /think <level>
+        // away. (System lines render in a <pre>, so the alignment holds.)
+        const currentLabel = thinkLabel(current)
+        const lines = THINK_LADDER.map(([value, label, note]) => {
+          const mark = current === value ? '\u25b8' : ' '
+          return ` ${mark} ${label.padEnd(6)} ${note}`
+        })
+        pushSystem(
+          `${echo}\n\n// thinking levels — \u25b8 = current (${currentLabel}: ${current === null ? 'no override — falls through to the mode default' : thinkNote(current)})\n` +
+            lines.join('\n') +
+            `\n\n// pick: /think off|low|med|high|ultra \u00b7 /think auto clears the override${activeConversation ? ' (this chat)' : ' (this mode\u2019s default for new chats)'}\n// low/high add effort guidance to the system prompt \u00b7 level-aware templates (gpt-oss, qwen3.8) budget them natively \u00b7 off is the hard off`,
+        )
         return
       }
-      const value = next === 'auto' ? null : next
+      let value
+      if (['auto', 'default', 'none'].includes(mode)) {
+        value = null
+      } else if (Object.prototype.hasOwnProperty.call(THINK_ALIASES, mode)) {
+        value = THINK_ALIASES[mode]
+      } else {
+        pushSystem(`${echo}\n\n// usage: /think off|low|med|high|ultra — bare /think shows the ladder`)
+        return
+      }
       if (activeConversation) {
         const updated = await api.updateConversation(activeConversation.id, { think: value === null ? 'auto' : value })
         if (updated) {
@@ -952,12 +1011,17 @@ export default function App() {
         }
       } else {
         chatDefaultsRef.current = { ...chatDefaultsRef.current, think: value }
-        // no chat open: /think edits the casual loadout default (auto clears back to off)
-        await api.saveSettings({ loadout_casual_think: value === null ? '' : value })
-        setLoadout((l) => ({ ...l, casualThink: value === 'on' ? 'on' : 'off' }))
+        // no chat open: edit the CURRENT mode's loadout default (auto clears)
+        if (codeArmed) {
+          await api.saveSettings({ loadout_code_think: value || '' })
+          setLoadout((l) => ({ ...l, codeThink: value || 'medium' }))
+        } else {
+          await api.saveSettings({ loadout_casual_think: value || '' })
+          setLoadout((l) => ({ ...l, casualThink: value || 'off' }))
+        }
       }
-      const label = value === null ? 'auto (model default)' : value
-      pushSystem(`${echo}\n\n// thinking: ${label}${activeConversation ? '' : ' — applies to new chats'}`)
+      const scope = activeConversation ? 'this chat' : codeArmed ? 'build default — new chats' : 'casual default — new chats'
+      pushSystem(`${echo}\n\n// thinking: ${thinkLabel(value)} — ${thinkNote(value)} (${scope})`)
       return
     }
 
@@ -1072,7 +1136,7 @@ export default function App() {
       const effModel = activeConversation?.model || selectedModel || '(none)'
       const effCtx = activeConversation?.context_length ?? chatDefaultsRef.current.context_length ?? 0
       const effThink =
-        activeConversation?.think ?? (codeArmed ? 'on' : loadout.casualThink === 'on' ? 'on' : 'off')
+        activeConversation?.think ?? (codeArmed ? (loadout.codeThink || 'medium') : (loadout.casualThink || 'off'))
       // sysprompt state reflects the real resolution: per-chat override, else
       // the mode's default (build = sysp.txt, casual = its own default).
       const effSysp =
@@ -1082,7 +1146,7 @@ export default function App() {
         ? `on (${(activeConversation?.system_prompt || '').trim() ? 'per-chat' : mode === 'build' ? 'sysp.txt' : 'casual default'})`
         : 'off'
       pushSystem(
-        `${echo}\n\n// mode: ${mode}\n// model: ${effModel} (casual loadout: ${loadout.casualModel || '—'} · build loadout: ${loadout.codeModel || '—'})\n// ctx: ${effCtx} · think: ${effThink || 'auto'} · tools: ${codeArmed ? 'armed' : 'off'} · sysprompt: ${syspLabel} · engine: ${engine}${engine === 'gpu' && engineVulkan ? '+vulkan' : ''}\n// workspace: ${workspace.root || '(unset)'}${workspace.project ? ` · project: ${workspace.project}` : ''}`,
+        `${echo}\n\n// mode: ${mode}\n// model: ${effModel} (casual loadout: ${loadout.casualModel || '—'} · build loadout: ${loadout.codeModel || '—'})\n// ctx: ${effCtx} · think: ${thinkLabel(effThink)} · tools: ${codeArmed ? 'armed' : 'off'} · sysprompt: ${syspLabel} · engine: ${engine}${engine === 'gpu' && engineVulkan ? '+vulkan' : ''}\n// workspace: ${workspace.root || '(unset)'}${workspace.project ? ` · project: ${workspace.project}` : ''}`,
       )
       return
     }
@@ -1169,9 +1233,9 @@ export default function App() {
     const arm = opts.forceArmed === true || codeArmed
     const codeMode = opts.forceArmed === true || codeArmed
     if (!selectedModel) return
-    // think: explicit per-chat /think wins; otherwise code mode is fixed on,
-    // casual follows the loadout toggle (off by default)
-    const think = activeConversation?.think ?? (codeMode ? 'on' : (loadout.casualThink === 'on' ? 'on' : 'off'))
+    // think: explicit per-chat /think wins; otherwise the mode's loadout
+    // default (build = loadout_code_think, med by default; casual = off)
+    const think = activeConversation?.think ?? (codeMode ? (loadout.codeThink || 'medium') : (loadout.casualThink || 'off'))
     let convId = opts.convId || activeId
     if (!convId && !activeConversation) {
       // Never stamp a system prompt into the new chat — the backend resolves
@@ -1184,6 +1248,9 @@ export default function App() {
       setActiveId(convId)
     }
     const attachmentIds = atts.map((a) => a.id)
+    // First real exchange of this chat? (command echoes / tool lines don't
+    // count) — the backend auto-titles the chat right after it completes.
+    const firstExchange = messages.filter((m) => m.role === 'user' || m.role === 'assistant').length === 0
     const userMsg = { id: -++idRef.current, role: 'user', content: outgoing, attachments: atts }
     const assistantMsg = { id: -++idRef.current, role: 'assistant', content: '' }
     setMessages((prev) => [...prev, userMsg, assistantMsg])
@@ -1292,6 +1359,20 @@ export default function App() {
       setStreaming(false)
       abortRef.current = null
       streamTargetRef.current = null
+    }
+    // Auto-title: after the FIRST exchange completes, ask the backend to name
+    // the chat (the conversation's own model, think off — or the derived
+    // first-message fallback). Fire-and-forget; skipped on abort; a manual
+    // /rename is frozen server-side (titled_manually). The response patches
+    // the header + /chats without a refetch.
+    if (convId && firstExchange && !controller.signal.aborted) {
+      api
+        .autoTitleConversation(convId)
+        .then((r) => {
+          if (r?.title)
+            setConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, title: r.title } : c)))
+        })
+        .catch(() => {})
     }
     const visible = splitThinking(partial, true)
       .filter((p) => !p.think)
@@ -1690,7 +1771,7 @@ export default function App() {
     window.addEventListener('mouseup', onUp)
   }
 
-  async function saveSettings({ ollamaUrl, systemPrompt, systemPromptScope, temperature, contextLength, accent: newAccent, sandboxTools: sandboxPref, sandboxBackend: sandboxBackendPref, loadoutCasualModel, loadoutCodeModel, loadoutCasualCtx, loadoutCodeCtx, loadoutCasualThink, bgBrightness: newBrightness, bgContrast: newContrast, engine: newEngine, engineVulkan: vulkanPref, workspaceRoot, activeProject }) {
+  async function saveSettings({ ollamaUrl, systemPrompt, systemPromptScope, temperature, contextLength, accent: newAccent, sandboxTools: sandboxPref, sandboxBackend: sandboxBackendPref, loadoutCasualModel, loadoutCodeModel, loadoutCasualCtx, loadoutCodeCtx, loadoutCasualThink, loadoutCodeThink, bgBrightness: newBrightness, bgContrast: newContrast, engine: newEngine, engineVulkan: vulkanPref, engineIgpu: igpuPref, workspaceRoot, activeProject }) {
     // Autosaved on every change (no Save button) — stay open, skip invalid
     // mid-typing values instead of failing the whole patch.
     const url = (ollamaUrl || '').trim()
@@ -1715,6 +1796,7 @@ export default function App() {
       ...(tempOk ? { default_temperature: temperature } : {}),
       default_context_length: newDefaultCtx,
       ...(loadoutCasualThink === undefined ? {} : { loadout_casual_think: loadoutCasualThink }),
+      ...(loadoutCodeThink === undefined ? {} : { loadout_code_think: loadoutCodeThink }),
       ...(loadoutCasualModel === undefined ? {} : { loadout_casual_model: loadoutCasualModel }),
       ...(loadoutCodeModel === undefined ? {} : { loadout_code_model: loadoutCodeModel }),
       ...(loadoutCasualCtx === undefined ? {} : { loadout_casual_ctx: loadoutCasualCtx }),
@@ -1723,6 +1805,7 @@ export default function App() {
       ...(newContrast === undefined ? {} : { bg_contrast: newContrast }),
       ...(newEngine === undefined ? {} : { engine: newEngine }),
       ...(vulkanPref === undefined ? {} : { engine_vulkan: vulkanPref }),
+      ...(igpuPref === undefined ? {} : { engine_igpu: igpuPref }),
       ...(workspaceRoot === undefined ? {} : { workspace_root: workspaceRoot }),
       ...(activeProject === undefined ? {} : { active_project: activeProject }),
     })
@@ -1732,21 +1815,23 @@ export default function App() {
     }
     if (newEngine !== undefined) setEngine(newEngine)
     if (vulkanPref !== undefined) setEngineVulkan(vulkanPref)
+    if (igpuPref !== undefined) setEngineIgpu(igpuPref)
     if (sandboxBackendPref !== undefined) setSandboxBackend(sandboxBackendPref)
-    if (loadoutCasualModel !== undefined || loadoutCodeModel !== undefined || loadoutCasualCtx !== undefined || loadoutCodeCtx !== undefined || loadoutCasualThink !== undefined) {
+    if (loadoutCasualModel !== undefined || loadoutCodeModel !== undefined || loadoutCasualCtx !== undefined || loadoutCodeCtx !== undefined || loadoutCasualThink !== undefined || loadoutCodeThink !== undefined) {
       setLoadout((l) => ({
         casualModel: loadoutCasualModel !== undefined ? loadoutCasualModel : l.casualModel,
         codeModel: loadoutCodeModel !== undefined ? loadoutCodeModel : l.codeModel,
         casualCtx: loadoutCasualCtx !== undefined ? loadoutCasualCtx : l.casualCtx,
         codeCtx: loadoutCodeCtx !== undefined ? loadoutCodeCtx : l.codeCtx,
-        casualThink: loadoutCasualThink !== undefined ? (loadoutCasualThink === 'on' ? 'on' : 'off') : l.casualThink,
+        casualThink: loadoutCasualThink !== undefined ? loadoutCasualThink : l.casualThink,
+        codeThink: loadoutCodeThink !== undefined ? loadoutCodeThink : l.codeThink,
       }))
     }
     chatDefaultsRef.current = {
       system_prompt: spToDefault && codeArmed ? systemPrompt : chatDefaultsRef.current.system_prompt,
       temperature,
       context_length: newDefaultCtx,
-      think: loadoutCasualThink !== undefined ? (loadoutCasualThink === 'on' ? 'on' : 'off') : chatDefaultsRef.current.think,
+      think: loadoutCasualThink !== undefined ? loadoutCasualThink : loadoutCodeThink !== undefined ? loadoutCodeThink : chatDefaultsRef.current.think,
     }
     if (spToDefault && !codeArmed) setCasualSysp(systemPrompt)
     setStatus(await api.getStatus())
@@ -1768,8 +1853,8 @@ export default function App() {
   }
 
   const currentModel = activeConversation?.model || selectedModel
-  // header shows the effective think: per-chat /think wins, else code is on, else casual toggle
-  const currentThink = activeConversation?.think ?? (codeArmed ? 'on' : (loadout.casualThink === 'on' ? 'on' : 'off'))
+  // header shows the effective think: per-chat /think wins, else the mode's loadout default
+  const currentThink = activeConversation?.think ?? (codeArmed ? (loadout.codeThink || 'medium') : (loadout.casualThink || 'off'))
 
   async function changeSettingsView(view) {
     setSettingsView(view)
@@ -1808,7 +1893,7 @@ export default function App() {
           <div className="chat-meta">
             <span className="hash">#</span>
             {activeConversation?.title || 'no chat'}
-            <span className="meta-model"> · {codeArmed ? 'build' : 'casual'} · model: {currentModel || 'none'} · think: {currentThink || 'auto'}</span>
+            <span className="meta-model"> · {codeArmed ? 'build' : 'casual'} · model: {currentModel || 'none'} · think: {thinkLabel(currentThink)}</span>
           </div>
         </header>
         <ChatView messages={messages} status={status} streaming={streaming} showStats={showStats} onLoadToIde={loadToIde} onRunCode={runInIde} onDownloadArtifact={downloadArtifact} onOpenArtifact={openArtifact} onOllamaReady={refreshStatus} onResendFrom={resendFrom} />
@@ -1882,6 +1967,7 @@ export default function App() {
             bgContrast={bgContrast}
             engine={engine}
             engineVulkan={engineVulkan}
+            engineIgpu={engineIgpu}
             onServerChanged={refreshStatus}
             accent={accent}
             sandboxTools={sandboxTools}

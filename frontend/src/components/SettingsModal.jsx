@@ -4,6 +4,34 @@ import { getBundledPrompt, getPromptFile, openPromptInEditor } from '../api'
 
 const CTX_STEPS = [0, 512, 1024, 2048, 4096, 8192, 12288, 16384, 24576, 32768, 49152, 50000, 65536, 131072]
 
+// canonical values = the backend's (off/low/medium/high/on — on = uncapped),
+// shown with the short UI words; App resolves the level at send time. low/high
+// carry effort GUIDANCE in the system prompt (ollama's own trick), so they do
+// something on every model; only gpt-oss/qwen3.8 templates budget natively.
+const THINK_LEVELS = [
+  ['off', 'off'],
+  ['low', 'low'],
+  ['medium', 'med'],
+  ['high', 'high'],
+  ['on', 'ultra'],
+]
+
+function ThinkLadder({ value, onPick }) {
+  return (
+    <div className="think-toggle">
+      {THINK_LEVELS.map(([v, label]) => (
+        <button
+          key={v}
+          className={`btn-ghost${value === v ? ' on' : ''}`}
+          onClick={() => onPick(v)}
+        >
+          [ {label} ]
+        </button>
+      ))}
+    </div>
+  )
+}
+
 function fmtTokens(n) {
   if (!n) return 'default'
   return n >= 1024 ? `${n / 1024}k` : String(n)
@@ -107,7 +135,7 @@ function ModelSelect({ label, value, onChange, models }) {
   )
 }
 
-export default function SettingsModal({ status, conversation, accent, sandboxTools, sandboxBackend, model, models, loadout, view, onViewChange, bgBrightness, bgContrast, engine, engineVulkan, workspace, defaultSystemPrompt, defaultSystemPromptCasual, mode, onSave, onClose, onOpenModels, onServerChanged }) {
+export default function SettingsModal({ status, conversation, accent, sandboxTools, sandboxBackend, model, models, loadout, view, onViewChange, bgBrightness, bgContrast, engine, engineVulkan, engineIgpu, workspace, defaultSystemPrompt, defaultSystemPromptCasual, mode, onSave, onClose, onOpenModels, onServerChanged }) {
   const [ollamaUrl, setOllamaUrl] = useState(status?.url || 'http://localhost:11434')
   // Show the EFFECTIVE prompt: per-chat override when set, else the mode's
   // default (build = sysp.txt; casual = its own default, empty out of the
@@ -126,11 +154,13 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
   const [codeModel, setCodeModel] = useState(loadout?.codeModel || '')
   const [casualCtxText, setCasualCtxText] = useState(loadout?.casualCtx ? String(loadout.casualCtx) : '')
   const [codeCtxText, setCodeCtxText] = useState(loadout?.codeCtx ? String(loadout.codeCtx) : '')
-  const [casualThink, setCasualThink] = useState(loadout?.casualThink === 'on' ? 'on' : 'off')
+  const [casualThink, setCasualThink] = useState(loadout?.casualThink || 'off')
+  const [codeThink, setCodeThink] = useState(loadout?.codeThink || 'medium')
   const [bgB, setBgB] = useState(bgBrightness ?? DEFAULT_BRIGHTNESS)
   const [bgC, setBgC] = useState(bgContrast ?? DEFAULT_CONTRAST)
   const [engineSel, setEngineSel] = useState(['auto', 'cpu', 'gpu'].includes(engine) ? engine : 'auto')
   const [vulkanOn, setVulkanOn] = useState(engineVulkan === true)
+  const [igpuOn, setIgpuOn] = useState(engineIgpu === true)
   // Workspace root commits on blur/Enter only — never debounced, so a
   // half-typed absolute path can never become the live root mid-typing.
   const [wsRootText, setWsRootText] = useState(workspace?.root || '')
@@ -161,7 +191,7 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
   useEffect(() => {
     const t = setTimeout(fetchGpu, 700)
     return () => clearTimeout(t)
-  }, [engineSel, vulkanOn])
+  }, [engineSel, vulkanOn, igpuOn])
 
   async function restartServer() {
     setRestartBusy(true)
@@ -225,6 +255,7 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
       sandboxTools: sandboxOn,
       sandboxBackend: backendSel,
       loadoutCasualThink: casualThink,
+      loadoutCodeThink: codeThink,
       loadoutCasualModel: casualModel,
       loadoutCodeModel: codeModel,
       loadoutCasualCtx: parseCtxText(casualCtxText),
@@ -233,6 +264,7 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
           bgContrast: bgC,
           engine: engineSel,
           engineVulkan: vulkanOn,
+          engineIgpu: igpuOn,
         }
   }
   const buildRef = useRef(buildPayload)
@@ -270,7 +302,7 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
         .catch(() => setSaveState('error'))
     }, 500)
     return () => clearTimeout(t)
-  }, [ollamaUrl, systemPrompt, temperature, ctxText, selectedAccent, sandboxOn, backendSel, casualModel, codeModel, casualCtxText, codeCtxText, casualThink, bgB, bgC, engineSel, vulkanOn])
+  }, [ollamaUrl, systemPrompt, temperature, ctxText, selectedAccent, sandboxOn, backendSel, casualModel, codeModel, casualCtxText, codeCtxText, casualThink, codeThink, bgB, bgC, engineSel, vulkanOn, igpuOn])
   // flush-on-unmount: fire-and-forget, no setState (we're unmounting)
   useEffect(
     () => () => {
@@ -428,18 +460,19 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
               <CtxField label="Casual context" ctxText={casualCtxText} setCtxText={setCasualCtxText} model={casualModel} />
               <label>
                 <span>Thinking</span>
-                <div className="think-toggle">
-                  <button className={`btn-ghost${casualThink === 'on' ? ' on' : ''}`} onClick={() => { setCasualThink('on'); commitNow({ loadoutCasualThink: 'on' }) }}>[ on ]</button>
-                  <button className={`btn-ghost${casualThink === 'off' ? ' on' : ''}`} onClick={() => { setCasualThink('off'); commitNow({ loadoutCasualThink: 'off' }) }}>[ off ]</button>
-                </div>
+                <ThinkLadder value={casualThink} onPick={(v) => { setCasualThink(v); commitNow({ loadoutCasualThink: v }) }} />
               </label>
-              <p className="prompt-note">// no need for casual — leave off unless reasoning</p>
+              <p className="prompt-note">// no need for casual — leave off unless reasoning · low/high add effort guidance</p>
             </div>
             <div className="loadout-col">
               <div className="loadout-title"># build</div>
               <ModelSelect label="Build model" value={codeModel} onChange={(v) => { setCodeModel(v); commitNow({ loadoutCodeModel: v }) }} models={models} />
               <CtxField label="Build context" ctxText={codeCtxText} setCtxText={setCodeCtxText} model={codeModel} hint="50000" />
-              <p className="prompt-note">// thinking is always on in build mode — coding is better with think · /think off to override</p>
+              <label>
+                <span>Thinking</span>
+                <ThinkLadder value={codeThink} onPick={(v) => { setCodeThink(v); commitNow({ loadoutCodeThink: v }) }} />
+              </label>
+              <p className="prompt-note">// default med — low/high add effort guidance; level-aware models (gpt-oss, qwen3.8) budget natively · /think off to disable</p>
             </div>
           </div>
         ) : (
@@ -448,15 +481,16 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
             <CtxField label="Casual context" ctxText={casualCtxText} setCtxText={setCasualCtxText} model={casualModel} />
             <label>
               <span>Thinking (casual)</span>
-              <div className="think-toggle">
-                <button className={`btn-ghost${casualThink === 'on' ? ' on' : ''}`} onClick={() => { setCasualThink('on'); commitNow({ loadoutCasualThink: 'on' }) }}>[ on ]</button>
-                <button className={`btn-ghost${casualThink === 'off' ? ' on' : ''}`} onClick={() => { setCasualThink('off'); commitNow({ loadoutCasualThink: 'off' }) }}>[ off ]</button>
-              </div>
+              <ThinkLadder value={casualThink} onPick={(v) => { setCasualThink(v); commitNow({ loadoutCasualThink: v }) }} />
             </label>
-            <p className="prompt-note">// no need for casual — leave off unless reasoning</p>
+            <p className="prompt-note">// no need for casual — leave off unless reasoning · low/high add effort guidance</p>
             <ModelSelect label="Build model" value={codeModel} onChange={(v) => { setCodeModel(v); commitNow({ loadoutCodeModel: v }) }} models={models} />
             <CtxField label="Build context" ctxText={codeCtxText} setCtxText={setCodeCtxText} model={codeModel} hint="50000" />
-            <p className="prompt-note">// thinking is always on in build mode — coding is better with think · /think off to override</p>
+            <label>
+              <span>Thinking (build)</span>
+              <ThinkLadder value={codeThink} onPick={(v) => { setCodeThink(v); commitNow({ loadoutCodeThink: v }) }} />
+            </label>
+            <p className="prompt-note">// default med — low/high add effort guidance; level-aware models (gpt-oss, qwen3.8) budget natively · /think off to disable</p>
           </>
         )}
         <label>
@@ -567,14 +601,24 @@ export default function SettingsModal({ status, conversation, accent, sandboxToo
                 {gpuInfo.nvidia ? (
                   <p className="prompt-note">// CUDA card found — Ollama uses it automatically, nothing to force</p>
                 ) : gpuInfo.vulkan ? (
-                  <label className="sandbox-row">
-                    <input
-                      type="checkbox"
-                      checked={vulkanOn}
-                      onChange={(e) => { setVulkanOn(e.target.checked); commitNow({ engineVulkan: e.target.checked }) }}
-                    />
-                    <span>Use Intel / other GPU via Vulkan (experimental — MoE models may crash; CPU stays the fallback)</span>
-                  </label>
+                  <>
+                    <label className="sandbox-row">
+                      <input
+                        type="checkbox"
+                        checked={vulkanOn}
+                        onChange={(e) => { setVulkanOn(e.target.checked); commitNow({ engineVulkan: e.target.checked }) }}
+                      />
+                      <span>Use GPUs via Vulkan — for AMD cards ROCm can't see (RX 500/Vega era and older); works for most cards</span>
+                    </label>
+                    <label className="sandbox-row">
+                      <input
+                        type="checkbox"
+                        checked={igpuOn}
+                        onChange={(e) => { setIgpuOn(e.target.checked); commitNow({ engineIgpu: e.target.checked }) }}
+                      />
+                      <span>Allow integrated GPUs — tick if the iGPU is your ONLY gpu; untick so a discrete card (RX 580 etc.) wins over the iGPU</span>
+                    </label>
+                  </>
                 ) : (
                   <p className="prompt-note">// no GPU backend visible — CPU it is (install GPU drivers, then re-open settings)</p>
                 )}

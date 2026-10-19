@@ -708,10 +708,58 @@ def format_resource_request(items):
     return "\n".join(lines)
 
 
+# Reasoning is NOT replayed into context: every past turn's <think> block
+# would otherwise accumulate forever (old chats drown small ctx windows, and
+# re-reading its own old reasoning invites the model to think even more).
+# The DB keeps the full text — ChatView renders it, /logsave exports it —
+# only the outgoing payload drops it. Anchored at the start because
+# stream_chat always wraps the thinking channel first; a literal <think>
+# inside code the model wrote mid-answer must survive.
+THINK_STRIP_RE = re.compile(r"^\s*<think(?:ing)?>.*?(?:</think(?:ing)?>|\Z)\s*", re.S)
+
+# Prompt-based thinking levels (2026-10-19): only level-aware templates
+# (gpt-oss/harmony; Qwen3.8 on newer engines) map the think STRING to a real
+# budget — every other model treats the string as truthy = plain on (verified
+# live: ornith-1.5:9b / qwen3.5:0.8b "low" ≡ on). Ollama's own renderer solves
+# the same problem with system-prompt guidance (model/renderers/qwen35.go:
+# "Reasoning effort is set to low…"), so mirror that here and carry low/high
+# in the system prompt too. medium stays the model default and ultra stays
+# uncapped — no injection for either, matching Ollama's choice. On a real
+# level-aware model the renderer's line and ours coexist (harmless redundancy).
+THINK_EFFORT_PROMPTS = {
+    "low": (
+        "Reasoning effort is set to low: keep your thinking brief and focused, "
+        "moving directly to the conclusion without unnecessary elaboration."
+    ),
+    "high": (
+        "Reasoning effort is set to high: think the task through carefully — "
+        "validate key assumptions, consider plausible alternatives, and "
+        "double-check the answer before responding."
+    ),
+}
+
+
+def apply_think_effort(sys_prompt, think):
+    """Append the effort-guidance line for low/high think levels (prompt-based
+    levels for bool-only models — see THINK_EFFORT_PROMPTS). Junk think values
+    degrade to no injection, never an error."""
+    try:
+        level = store.normalize_think(think)
+    except (ValueError, TypeError):
+        level = None
+    text = THINK_EFFORT_PROMPTS.get(level)
+    if not text:
+        return sys_prompt
+    return f"{sys_prompt}\n\n{text}" if sys_prompt.strip() else text
+
+
 def build_history(rows):
     out = []
     for m in rows:
-        entry = {"role": m["role"], "content": m["content"]}
+        content = m["content"]
+        if m["role"] == "assistant":
+            content = THINK_STRIP_RE.sub("", content or "").lstrip()
+        entry = {"role": m["role"], "content": content}
         if m.get("tool_calls"):
             entry["tool_calls"] = m["tool_calls"]
         out.append(entry)
@@ -919,6 +967,7 @@ class SettingsUpdate(BaseModel):
     default_temperature: float | None = None
     default_context_length: int | None = None
     default_think: bool | str | None = None
+    loadout_code_think: str | None = None
     loadout_casual_model: str | None = None
     loadout_code_model: str | None = None
     loadout_casual_ctx: int | None = None
@@ -929,6 +978,7 @@ class SettingsUpdate(BaseModel):
     settings_view: str | None = None
     engine: str | None = None
     engine_vulkan: bool | None = None
+    engine_igpu: bool | None = None
     workspace_root: str | None = None
     active_project: str | None = None
 
@@ -1062,6 +1112,88 @@ async def context_resource_request(conversation_id: int):
     """Poll target for the cart UI: the conversation's open resource request."""
     req = store.get_pending_resource_request(conversation_id)
     return req or {"id": None, "items": []}
+
+
+_TITLE_MAX_CHARS = 48
+
+
+def derive_title(text):
+    """Cheap first-message title: single line, whitespace-collapsed, capped.
+    Replaced later by the AI auto-title unless the user named the chat."""
+    return " ".join((text or "").split())[:_TITLE_MAX_CHARS].strip()
+
+
+def _clean_llm_title(raw):
+    """Sanitize whatever the model returned for a title: drop thinking
+    wrappers/labels, take the first line, strip quotes, collapse, cap."""
+    text = re.sub(r"<think(?:ing)?>.*?(?:</think(?:ing)?>|\Z)", " ", raw or "", flags=re.S)
+    text = text.strip().splitlines()[0] if text.strip() else ""
+    text = re.sub(r"^\s*(title\s*:\s*)", "", text, flags=re.I)
+    text = text.strip().strip("\"'`“”‘’*").strip()
+    return " ".join(text.split())[:60]
+
+
+async def generate_chat_title(model, user_text, assistant_text):
+    """One-shot LLM title for a chat's first exchange (non-streaming
+    /api/chat, think off, tiny cap). Returns a cleaned title or None —
+    NEVER raises; the caller falls back to derive_title on None."""
+    prompt = (
+        "Write a short title (2-6 words) for this conversation exchange. "
+        "Name the concrete subject, not the task. Reply with ONLY the title "
+        "text — no quotes, no period, no label.\n\n"
+        f"USER: {user_text[:600]}\n\nASSISTANT: {assistant_text[:600]}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
+            resp = await client.post(
+                f"{ollama.base_url()}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                    "think": False,
+                    "options": {"temperature": 0.3, "num_predict": 32},
+                },
+            )
+        resp.raise_for_status()
+    except Exception:
+        return None
+    content = ((resp.json().get("message") or {}).get("content")) or ""
+    cleaned = _clean_llm_title(content)
+    return cleaned or None
+
+
+@app.post("/api/conversations/{conversation_id}/auto-title")
+async def auto_title_conversation(conversation_id: int):
+    """Name an untitled chat from its first exchange. The conversation's own
+    model labels it; any failure falls back to the derived first-message
+    title. A manual title (titled_manually) is never overwritten. Safe to
+    call speculatively — it no-ops instead of erroring."""
+    conversation = store.get_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(404, "Conversation not found")
+    if conversation["titled_manually"]:
+        return {"title": conversation["title"], "source": "kept"}
+    msgs = store.get_messages(conversation_id)
+    first_user = next((m["content"] for m in msgs if m["role"] == "user"), "")
+    # skip tool/labelled channels — the first real assistant sentence titles
+    first_assistant = next(
+        (m["content"] for m in msgs if m["role"] == "assistant" and (m["content"] or "").strip()), ""
+    )
+    if not first_user.strip() or not first_assistant.strip():
+        return {"title": conversation["title"], "source": "kept"}
+    derived = derive_title(first_user)
+    source = "derived"
+    title = None
+    if conversation["model"]:
+        title = await generate_chat_title(conversation["model"], first_user, first_assistant)
+        if title:
+            source = "ai"
+    if not title:
+        title = derived
+    if title and title != conversation["title"]:
+        store.update_conversation(conversation_id, title=title)
+    return {"title": title, "source": source}
 
 
 async def summarize_page_text(model, title, text):
@@ -1674,9 +1806,11 @@ async def get_settings():
         "bg_brightness": int(store.get_setting("bg_brightness") or 100),
         "bg_contrast": int(store.get_setting("bg_contrast") or 100),
         "loadout_casual_think": store.get_setting("loadout_casual_think") or "",
+        "loadout_code_think": store.get_setting("loadout_code_think") or "",
         "settings_view": store.get_setting("settings_view") or "split",
         "engine": store.get_setting("engine") or "auto",
         "engine_vulkan": store.get_setting("engine_vulkan") == "1",
+        "engine_igpu": store.get_setting("engine_igpu") == "1",
         "workspace_root": str(workspace.root()),
         "active_project": workspace.active_project(),
     }
@@ -1703,9 +1837,11 @@ async def update_settings(body: SettingsUpdate):
         and body.bg_brightness is None
         and body.bg_contrast is None
         and body.loadout_casual_think is None
+        and body.loadout_code_think is None
         and body.settings_view is None
         and body.engine is None
         and body.engine_vulkan is None
+        and body.engine_igpu is None
         and body.workspace_root is None
         and body.active_project is None
     ):
@@ -1740,10 +1876,17 @@ async def update_settings(body: SettingsUpdate):
     if body.bg_contrast is not None:
         store.set_setting("bg_contrast", str(max(0, min(150, int(body.bg_contrast)))))
     if body.loadout_casual_think is not None:
-        v = body.loadout_casual_think.strip().lower()
-        if v not in ("on", "off", ""):
-            raise HTTPException(422, "loadout_casual_think must be on, off, or empty")
-        store.set_setting("loadout_casual_think", v)
+        try:
+            v = store.normalize_think(body.loadout_casual_think)
+        except ValueError as exc:
+            raise HTTPException(422, f"loadout_casual_think: {exc}")
+        store.set_setting("loadout_casual_think", v or "")
+    if body.loadout_code_think is not None:
+        try:
+            v = store.normalize_think(body.loadout_code_think)
+        except ValueError as exc:
+            raise HTTPException(422, f"loadout_code_think: {exc}")
+        store.set_setting("loadout_code_think", v or "")
     if body.settings_view is not None:
         v = body.settings_view.strip().lower()
         if v not in ("list", "split"):
@@ -1756,6 +1899,8 @@ async def update_settings(body: SettingsUpdate):
         store.set_setting("engine", v)
     if body.engine_vulkan is not None:
         store.set_setting("engine_vulkan", "1" if body.engine_vulkan else "0")
+    if body.engine_igpu is not None:
+        store.set_setting("engine_igpu", "1" if body.engine_igpu else "0")
     if body.ollama_url is not None:
         if not body.ollama_url.startswith(("http://", "https://")):
             raise HTTPException(422, "ollama_url must start with http:// or https://")
@@ -1906,6 +2051,10 @@ async def update_conversation(conversation_id: int, body: ConversationUpdate):
         context_length=body.context_length,
         code_mode=body.code_mode,
     )
+    if body.title is not None:
+        # A title arriving through PATCH is a USER naming decision — freeze it
+        # against the auto-titler and the first-message derive.
+        kwargs["titled_manually"] = 1
     if body.think is not None:
         try:
             kwargs["think"] = store.normalize_think(body.think)
@@ -2031,7 +2180,7 @@ async def chat(body: ChatRequest):
 
     user_row = store.add_message(body.conversation_id, "user", content)
     if not conversation["title"]:
-        store.update_conversation(body.conversation_id, title=content[:60])
+        store.update_conversation(body.conversation_id, title=derive_title(content))
     if body.attachment_ids:
         store.attach_to_message(body.attachment_ids, user_row["id"], body.conversation_id)
     history = build_history(store.get_messages(body.conversation_id))
@@ -2066,6 +2215,9 @@ async def chat(body: ChatRequest):
         sys_prompt = per_chat or (store.get_setting("default_system_prompt") or "")
     else:
         sys_prompt = per_chat or (store.get_setting("default_system_prompt_casual") or "")
+    # Live project listing for the request tail — bound in BOTH modes (the
+    # tail injection below must never hit an unbound name in casual).
+    ws_tail = ""
     if tools:
         file_first = (
             "FILE-FIRST DELIVERY (build mode — HARD RULE): the deliverable is FILES in the "
@@ -2115,6 +2267,11 @@ async def chat(body: ChatRequest):
             "alternative API names, parameter orders, or signatures; consult them with "
             "read_document."
         )
+        listing_note = (
+            "The CURRENT project listing arrives each turn as a trailing [context note] "
+            "after the user's latest message — treat it as ground truth you can ws_read, "
+            "not a suggestion to re-list."
+        )
         directive = (
             "You have file tools plus run_python. " + file_first + " Use them proactively "
             "for computation, running code, and file work — call them instead of guessing "
@@ -2124,12 +2281,18 @@ async def chat(body: ChatRequest):
             "school formats: build_xlsx (Excel workbooks), build_docx (Word documents) "
             "and build_pdf (PDF handouts/worksheets) all take a structured outline and "
             "save the file plus an auto-opening preview. " + ws_rules + " " + resource_rules
+            + " " + listing_note
         )
         sys_prompt = f"{sys_prompt}\n\n{directive}" if sys_prompt.strip() else directive
         # Auto-context (always): the model sees the live project listing every
         # code-mode turn, so "I can't see your files" refusals contradict
         # visible context. Best-effort and silent — a failure here must never
-        # break the turn.
+        # break the turn. The listing goes to ws_tail (appended to the NEWEST
+        # message at request time), NOT the system prompt: the system prompt
+        # sits at the TOP of the payload, so any per-turn change there (a file
+        # size after ws_write) busts Ollama's KV prefix cache and forces a
+        # full re-prefill of the whole history — the "build mode gets slow
+        # after tool turns" cliff. A tail injection re-prefills only itself.
         try:
             if workspace.active_project():
                 ls_res = workspace.ls("")
@@ -2141,12 +2304,7 @@ async def chat(body: ChatRequest):
                     ]
                     if len(ls_res["entries"]) > 60:
                         lines.append(f"...(+{len(ls_res['entries']) - 60} more — ws_ls to see all)")
-                    listing = "\n".join(lines) if lines else "(empty project — ws_write to create files)"
-                    sys_prompt += (
-                        f"\n\n[project {workspace.active_project()} contents — "
-                        "you CAN read these with ws_read]\n" + listing +
-                        "\n[reminder: deliver FILES (ws_write) — code pasted in chat is a failure]"
-                    )
+                    ws_tail = "\n".join(lines) if lines else "(empty project — ws_write to create files)"
             else:
                 sys_prompt += (
                     "\n\n[no active project — if the user wants file work, do NOT ask them "
@@ -2156,6 +2314,31 @@ async def chat(body: ChatRequest):
                 )
         except Exception:
             pass
+
+    # Prompt-based think level (both modes — casual has no directive, so the
+    # guidance line may BE the whole system prompt). Applied last: it should
+    # be the final instruction the model reads.
+    sys_prompt = apply_think_effort(sys_prompt, think)
+
+    # Live project listing rides as a TRAILING context message after the
+    # newest outgoing message — never the system prompt, never the DB (see
+    # the ws_tail note above). Trailing (not in-message) is what makes the
+    # KV prefix cache work: turn N's prompt = turn N-1's prompt + [assistant
+    # reply, new user msg, fresh listing], so the reused prefix runs all the
+    # way through the previous user message. The stable pointer to it lives
+    # in the directive instead.
+    if ws_tail and tools and history and history[-1]["role"] == "user":
+        history.append(
+            {
+                "role": "user",
+                "content": (
+                    f"[context note — auto-attached by the system, not typed by the user: "
+                    f"live listing of project {workspace.active_project()} — you CAN "
+                    "ws_read any of these; deliver FILES (ws_write), not pasted code]\n"
+                    + ws_tail
+                ),
+            }
+        )
 
     async def generator():
         yield json.dumps({"user_id": user_row["id"]}) + "\n"

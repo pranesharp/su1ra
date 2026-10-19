@@ -48,6 +48,38 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
 
 - **casual** vs **build** mode. Per-mode loadout: model, context length, think
   on/off, system prompt (build mode appends the file-workflow directive).
+- **Think levels (2026-10-19):** `off|low|med|high|ultra` replaces the on/off toggle.
+  Canonical stored values = Ollama's `off/low/medium/high/on` (ultra = on, uncapped; per-chat
+  `auto` = null → mode default). Canonicalization: `store.THINK_ALIASES` (med/ultra/max/
+  true/false/0/1); `ollama.normalize_think_param` maps off→false, on/ultra→true,
+  low/med/medium/high→the level string. Only level-aware templates (gpt-oss family)
+  actually budget reasoning — a bool-only template (qwen3 family, `{{ if .Think }}`)
+  treats the string as truthy = plain on, so `/think off` is the only real ctx lever
+  there. Per-mode defaults: `loadout_casual_think` ('' → off) and NEW
+  `loadout_code_think` ('' → med — was hardcoded think-on in build). SettingsModal
+  renders a 5-button ladder per mode (`ThinkLadder`); bare `/think` prints the whole
+  ladder with ▸ on the current level; `/think <level>` persists per-chat (or the
+  CURRENT mode's loadout default when no chat is open). Header + /modes show the
+  pretty label (med/ultra). Harness `report/report/repro-think-levels.py`.
+- **Prompt-based effort levels (2026-10-19 later — the bool-only lever):** since
+  Ollama's own Qwen3.8 renderer implements tiers as system-prompt GUIDANCE
+  (model/renderers/qwen35.go "Reasoning effort is set to…"), main.py does the same
+  for low/high: `apply_think_effort(sys_prompt, think)` (pure, unit-tested) appends
+  `THINK_EFFORT_PROMPTS[level]` at the END of the assembled sys_prompt — BOTH modes
+  (casual's guidance line may be the whole system prompt), after the build directive.
+  medium = model default and ultra = uncapped → deliberately NO injection (matches
+  Ollama); junk think values degrade to no injection. `/api/show` exposes no thinking
+  controls, so there's no level-awareness probe — on a real level-aware model the
+  renderer's line and ours coexist (harmless redundancy). LIVE-VERIFIED on
+  ornith-1.5:9b (bool-only): palindrome task, think:true, same num_predict — without
+  guidance 1855 thinking chars, with the low line 116 (−94%), answer still correct.
+- **History think-strip (2026-10-19, the ctx fix):** `build_history` (main.py) strips
+  the LEADING `<think>…</think>` block from assistant rows before sending —
+  `THINK_STRIP_RE` (anchored `^\s*<think`, lazy to `</think>` or `\Z`, so an unclosed
+  tail from a dead stream also drops, and a literal `<think>` inside code the model
+  wrote mid-answer survives). DB/display/export keep the full text; the tool loop's
+  in-memory `working` list keeps the CURRENT request's round reasoning. History scope
+  was already per-conversation — the strip stops reasoning accumulating WITHIN a chat.
 - **System prompts are per-mode (2026-10-15):** build default = sysp.txt seed
   (`default_system_prompt`); casual default = `default_system_prompt_casual`
   (ships EMPTY — user's choice). Resolution: per-chat override → else mode
@@ -129,10 +161,17 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
   Runs in-process (like ws_* tools), not through run_python — no sandbox
   involved. Outline errors raise `OutlineError` → tool text tells the model
   how to fix. `run_python` remains the escape hatch for exotic pptx needs.
-- Auto-context injection: live project listing (60 cap) + a mandatory "call
-  ws_ls/ws_read first" trigger sentence appended to sys_prompt every code-mode turn;
-  no-project case injects /mkdir+/cd guidance instead. Best-effort, never breaks
-  the turn.
+- Auto-context injection: live project listing (60 cap) as a TRAILING `[context
+  note]` message after the newest outgoing message every build turn (was: appended
+  to sys_prompt — which sits at the TOP of the payload, so every ws_write's size
+  change busted llama-server's KV prefix slot and forced a full history re-prefill
+  at the iGPU's ~214 tok/s: measured 14.8s TTFT vs 0.61s cache-hit on the same
+  3032-token prompt, 2026-10-19). The system prompt is now byte-stable per mode —
+  only a stable `listing_note` pointer remains in the directive; the no-project
+  /mkdir+/cd guidance still injects into sys_prompt (rare, once per project start).
+  Tail message is request-only (never the DB); the tool loop re-copies `history`
+  per round so the note rides at a prefix-stable position. Best-effort, never
+  breaks the turn.
 - `/mkdir <name>` + `/cd <name>` commands; `workspace_root` + `active_project` in
   settings GET/PATCH with validation; `/api/workspace/mkdir|read|ls`.
 - **New chats start at the workspace root (2026-10-17):** `newChat()`/`startModeChat`
@@ -214,10 +253,24 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
 - Defaults (`default_system_prompt` / `default_temperature` /
   `default_context_length`) persist in the settings store; new conversations inherit
   them. Do NOT create conversations with `{model}` only — that was the original bug.
-- Engine selector: Auto/CPU/GPU + Vulkan checkbox, live detection (`GET /api/gpu`:
+- Engine selector: Auto/CPU/GPU + TWO independent checkboxes (Vulkan, integrated
+  GPU) with live detection (`GET /api/gpu`:
   nvidia-smi, vulkan loader, adapter names), env preview, `[ restart server ]`
   (`POST /api/ollama/restart` refuses foreign servers). `ensure_running` applies
   `engine_env()` to spawned servers.
+  **Hard switches (2026-10-19):** in auto+gpu modes `engine_env()` emits
+  `OLLAMA_VULKAN` and `OLLAMA_IGPU_ENABLE` as explicit 1/0 per checkbox
+  (`engine_vulkan` / `engine_igpu` settings; cpu mode still hides every
+  backend). Rationale — stock 0.40.x defaults cut both ways: Vulkan runner libs
+  load by DEFAULT (unchecked used to silently stay on) while Vulkan iGPUs are
+  DENIED by default (`discover.integratedGPUAllowedByDefault`: CUDA +
+  whitelisted ROCm GFX only), so the old gpu-mode unconditional
+  `OLLAMA_IGPU_ENABLE=1` could let an iGPU steal the model from a discrete
+  card (RX 580 gfx803 is invisible to ROCm — Vulkan is its only offload path;
+  the bundled engine ships `lib/ollama/vulkan/ggml-vulkan.dll`). FX: friend =
+  Vulkan ✓ + iGPU ✗; iGPU-only box (Arrow Lake) = both ✓. Upgraders on gpu
+  mode with a previously-implicit iGPU offload must tick iGPU once — the env
+  preview shows exactly what a restart will apply.
 - Settings modal shows the EFFECTIVE system prompt (per-chat else global default).
 - Session-scoped (reset at every app start): `show_stats`, `ide_open`. Everything
   else (accent, brightness, ide_width, ollama_url, sandbox_tools, loadout_*,
@@ -320,6 +373,8 @@ keep it current. (Rebuilt 2026-10-13 from git history + report/report/session-lo
 /help · /models (+ `pull <name>`, `get [query]`) · /chats · /delchat (<n|id>, `all`
 wipes everything) · /clear (current chat messages only, chat + settings kept) ·
 /newchat · /build (toggle; `<msg>` one-shot; /code hidden alias) · /casual · /modes · /mkdir · /cd ·
+/think (bare = the ladder menu; `off|low|med|high|ultra|auto`, this chat, persisted) ·
+/rename <title> (names the current chat; freezes it against auto-title) ·
 /settings · /stats · /logsave [md|json|txt] · /editor (/ide alias) · /eject · /connect · /web <url|query>
 
 ## Editor pane (2026-10-15 — renamed from /ide, general-purpose)
@@ -366,6 +421,24 @@ wipes everything) · /clear (current chat messages only, chat + settings kept) �
 
 ## History semantics
 
+- **Chat naming (2026-10-19):** every chat gets a title three ways, priority =
+  manual > AI > derived. (1) First user message stamps `derive_title(content)`
+  (whitespace-collapsed single line, 48 cap — was raw `content[:60]`, which is
+  where every chat became "hi"). (2) After the FIRST exchange completes, the
+  frontend fire-and-forgets `POST /api/conversations/{id}/auto-title`
+  (`generate_chat_title` = one-shot non-streaming /api/chat on the chat's own
+  model, think:false, num_predict 32, 20s timeout; `_clean_llm_title` strips
+  think wrappers/"Title:" labels/quotes and takes the first line; ANY failure
+  → falls back to the derived title; never raises). Response patches
+  conversations state — header + /chats update live. Trigger = `firstExchange`
+  (no user/assistant messages in state at send time); skipped on abort; old
+  chats already titled "hi" are NOT retro-fixed (no messages-empty moment —
+  /rename them). (3) `/rename <title>` PATCHes the title and sets
+  `conversations.titled_manually = 1` (migration, ALTER + DEFAULT 0) — the
+  auto-titler and re-derive NEVER touch a manual title. `/clear` wipes title
+  AND the flag (blank slate, auto-title fires again on the next exchange).
+  Harness `report/report/repro-chat-naming.py` (LLM monkeypatched).
+
 - User messages render copy / edit / redo; edit + redo truncate via
   `DELETE /api/messages/{id}/following` then resend. Chat stream emits real
   `user_id` (first event) and `assistant_id` (done event) — UI must target DB ids.
@@ -377,6 +450,12 @@ wipes everything) · /clear (current chat messages only, chat + settings kept) �
 - Linux daily driver: `ornith-1.5:9b` (ollama library; qwen35 base, 9B, 262k ctx,
   Q4_K_M; tools/thinking/vision — native tool calls work well). `deepseek-r1:1.5b`
   never emits tool_calls (content-fallback path). qwen2.5-coder:7b was removed.
+- **Level-aware think (verified 2026-10-19 against ollama source + live /api/show):**
+  on the bundled 0.40.1 engine only the gpt-oss family (harmony) maps Think to
+  low/medium/high — every other installed model is bool-only, so `/think off` is the
+  real ctx lever. Newer engines (renderer layer) add: Qwen3.8 (false/low/medium/xhigh —
+  unsupported strings fall to DEFAULT xhigh, our "high" included), glimmer
+  (false/low/medium/high/max), nemotron3nano v3.5 (+"medium"). See session-log.
 - Windows box holds: Qwen3.8-9b/4bD, gemma4:e4b, qwen3.5:4b.
 
 ## Build / run

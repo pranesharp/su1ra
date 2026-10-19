@@ -1950,3 +1950,250 @@ into the project. Levers (prompt-level, appended directive only — sysp.txt SAC
 - Harness +2 checks (61 total, ALL PASS): FILE-FIRST + reminder present in the effective
   code-mode sysprompt. Real-model behavior check (does Qwen3.8 actually comply) = user's
   click-through.
+
+## 2026-10-19: think levels (off/low/med/high/ultra) + history think-strip — IMPLEMENTED, awaiting click-through
+
+User ask: "manage thinking levels — low, med, high, ultra — the model thinks too much and
+runs out of ctx." Discovery first: `store.THINK_VALUES`/`normalize_think` and
+`ollama.normalize_think_param` ALREADY passed level strings through — only the surface
+(on/off toggles, `/think on|off|auto`, build hardcoded think-on) collapsed them.
+
+- **Levels:** canonical = Ollama's `off/low/medium/high/on` (ultra == on, uncapped — Ollama
+  has nothing above high; on/max/ultra all map to true). Aliases in `store.THINK_ALIASES`
+  (med, ultra, max, true/false, 0/1); error message updated. `normalize_think_param`
+  docstring documents the honest semantics: level strings only BUDGET reasoning on
+  level-aware templates (gpt-oss family); a bool-only template (`{{ if .Think }}`, qwen3
+  family) treats the string as truthy = plain on — no 400, silently "on" — so for THIS
+  box's Qwen3.8-9b, `/think off` is the only real lever (said out loud in the /think menu
+  and settings notes). No prompt-hacks, no template probing — the existing
+  model_supports_think debug log covers diagnostics.
+- **Backend:** main.py `build_history` now STRIPS the leading `<think>…</think>` from
+  assistant rows (`THINK_STRIP_RE`, anchored `^\s*<think`, lazy to `</think>` or `\Z` —
+  unclosed dead-stream tails drop too; a literal `<think>` inside code the model wrote
+  mid-answer survives because the strip is leading-only). DB/display//logsave keep full
+  text. The tool loop's in-memory `working` list is built from history once per request,
+  so past-turn reasoning is gone while the CURRENT request's rounds keep their reasoning.
+  History scope was already per-conversation (user asked: /newchat never carries older
+  chats) — this fixes accumulation WITHIN a chat. Settings: GET/PATCH gain
+  `loadout_code_think` ('' → build default, now **med** instead of hardcoded on);
+  `loadout_casual_think` validation switched to normalize_think (levels legal, '' clears).
+- **Frontend:** App.jsx THINK_LADDER/THINK_ALIASES/thinkLabel/thinkNote module helpers;
+  loadout state + boot read `loadout_code_think` (default med); send()/header//modes/
+  /casual-echo resolve per-chat → per-mode default via the same expression; saveSettings
+  gained loadoutCodeThink and stopped coercing think values to on/off. `/think` rewritten:
+  BARE = the full ladder menu (system `<pre>` keeps alignment) with ▸ on the current
+  level + a one-line note per level + the bool-only caveat; `/think <level>` persists
+  per-chat, or when NO chat is open writes the CURRENT mode's loadout default (build
+  wrote casual before — fixed). SettingsModal: shared `ThinkLadder` (5 ghost buttons,
+  canonical values, UI words off/low/med/high/ultra) in BOTH layouts for BOTH modes;
+  autosave deps + payload updated; build note says "default med · bool-only models treat
+  low–ultra as on · /think off to disable". `.think-toggle` gets flex-wrap (5 buttons in
+  a narrow column). /help /think row updated.
+- **Verified:** `report/report/repro-think-levels.py` (temp APPDATA, TestClient) —
+  normalize aliases ×15, think_param mapping ×13, settings PATCH/GET round-trip (med →
+  canonical medium; high on casual; banana → 422; auto → ''), per-chat think level create/
+  update, build_history strip (closed block, unclosed tail, mid-code survivor,
+  non-leading block kept, tool_calls preserved, plain untouched). ALL PASS.
+  Regressions: repro-mode-prompts (19), repro-tool-loop (10/10), repro-resource-cart
+  (30) ALL PASS; repro-split-thinking.mjs 19/19 (ChatView untouched). `npm run build` ok
+  (index-DCPdw0Qb.js contains the ladder strings).
+- NOT verified live: ollama was down during the session — no real generation through a
+  level string (low/med/high against Qwen3.8-9b → expect "acts as on", no error; gpt-oss
+  models not on the box). User click-through: /think menu render, settings ladder,
+  ctx-time difference on a long build chat after the history strip.
+- Chat-naming request (every chat titled "hi"; wants user naming and/or AI labels) —
+  DISCUSSED, deliberately deferred to the next batch (title = first message content[:60];
+  plan: /rename + optional auto-title after the first exchange).
+
+## 2026-10-19 (same session): chat naming — /rename + AI auto-title, IMPLEMENTED
+
+User ask (from the think discussion): every chat is labelled "hi" — wants manual
+naming and/or AI labels. Root cause found: the chat handler stamped
+`title = content[:60]` from the FIRST USER MESSAGE (main.py ~2057), so a chat
+opened with "hi" stayed "hi" forever.
+
+- **Design: priority manual > AI > derived.** (1) Instant derive still happens on
+  the first message but through `derive_title()` — whitespace-collapsed single
+  line, 48 chars (raw [:60] could carry newlines into /chats). (2) NEW
+  `POST /api/conversations/{id}/auto-title` — runs `generate_chat_title()` on the
+  chat's own model: one-shot non-streaming /api/chat, **think:false** (a thinking
+  model would burn a minute on a title), num_predict 32, temp 0.3, 20s timeout;
+  `_clean_llm_title()` strips <think> wrappers (incl. unclosed), "Title:" labels,
+  quotes, takes the first line, caps 60; ANY failure (server down, timeout, empty)
+  → derived fallback; NEVER raises. Prompt: 2-6 words, name the concrete subject.
+  (3) NEW `/rename <title>` (bare = usage + current title) — PATCHes the
+  conversation; the PATCH handler stamps `titled_manually = 1` (new column, ALTER
+  migration DEFAULT 0) and from then on NOTHING auto-titles the chat.
+- **Frontend trigger:** `firstExchange` = no user/assistant messages in state at
+  send() time (command echoes/tool lines don't count; a /clear makes the next
+  exchange "first" again — clear_conversation_messages now also resets
+  titled_manually). Fired right after the stream's finally (natural abort skip —
+  fetch aborts propagate), fire-and-forget, response patches conversations state
+  so the header + /chats update live without a refetch. Skips entirely on the
+  redo/edit path (messages present) — the derive covers those. Old chats already
+  titled "hi" are NOT retro-fixed (no empty moment); /rename them.
+- **Verified:** report/report/repro-chat-naming.py (temp APPDATA, TestClient,
+  generate_chat_title monkeypatched): derive collapse/cap/empty, cleaner cases
+  (quotes, label, think wrapper incl. unclosed, first-line, collapse), AI title
+  applied + persisted (source=ai), fallback (source=derived), manual freeze
+  (source=kept), empty chat kept, /clear resets title+flag, empty assistant row
+  doesn't count. ALL PASS. Full battery re-run after npm build: think-levels,
+  mode-prompts (19), tool-loop (10), resource-cart (30), split-thinking (19/19).
+- NOT verified live: a real AI title needs ollama up (down this session) — click
+  through: open a chat, say something real, watch the header retitle a few seconds
+  after the reply; /rename a chat and confirm it never changes again.
+
+## 2026-10-19 (same session): which models are level-aware — verified from source + live /api/show
+
+User asked which models understand think levels. Started the bundled engine (0.40.1,
+left running) and probed /api/show templates for everything installed, then read
+ollama/ollama main's renderer layer (model/renderers/*.go — templates moved to Go).
+- **On the CURRENT bundled engine (0.40.1): only the gpt-oss family** (gpt-oss:20b/
+  120b/safeguard — harmony format) maps Think to low/medium/high. Everything else is
+  bool-only: live probes showed ornith-1.5:9b's template has `<think>` passthrough but
+  no `.Think` level branch; qwen3.5:0.8b's template ignores .Think entirely.
+- **On ollama main (renderer layer, newer than 0.40.1):** harmony → low/medium/high
+  (default medium); qwen35 renderer's **3.8 variant** → false/low/medium/xhigh (default
+  **xhigh** — unsupported strings fall to the DEFAULT, so our ladder "high" would land
+  on xhigh = heaviest; low/med fine, ultra(=bool true) fine); **glimmer** →
+  false/low/medium/high/max (default high — a native 5-rung ladder matching ours);
+  nemotron3nano v3.5 → false/true/"medium". All other families bool-only (incl. plain
+  qwen3.5 / ornith → matches the live probe).
+- Practical: pull **gpt-oss:20b** for a truly level-aware BUILD model on this engine
+  (~13 GB MXFP4, fits alongside a 9B). Engine upgrade (newer bundled ollama) unlocks
+  Qwen3.8 levels (mind the high→xhigh default-fallback) + glimmer's full ladder.
+  Until then, `/think off` stays the only ctx lever for the bool-only models on the box.
+
+- **16 GB reality check (same day, user-corrected):** none of that fits this box.
+  gpt-oss:20b ~13 GB weights (no headroom on 16 GB unified Arrow Lake once
+  Windows/iGPU/KV take their share); official qwen3.8 starts at 27B (18 GB q4 —
+  no 9B exists; the Qwen3.8-9b that was installed was a community distill with a
+  baked-in template that bypasses renderer level detection — treat bool-only);
+  glimmer = community muse-glimmer, 30B; nemotron-3-nano:4b (~2.5 GB q4, fits)
+  is the 3.0 family → bool-only (levels need family `nemotron-3.5-nano`, not in
+  the library). Conclusion: on THIS machine /think off + the history think-strip
+  are the only real levers today; the level ladder is forward-compatible for a
+  future bigger box or library additions.
+
+- **Correction + live A/B (user challenged "does qwen3.5 9b really lack tiers"):**
+  official `qwen3.5:9b` DOES exist in the library (q4 ≈ 6 GB — my earlier "nothing
+  small" framing was wrong on the size front). It still has NO level tiers, now
+  proven three ways: (1) qwen35.go v0.40.1 — default variant Thinking() =
+  {false, true}; the effort-instruction strings (low → "keep your thinking brief",
+  xhigh → "think carefully...") are injected ONLY under `variant ==
+  qwen35Renderer38` (call-site gate, ~line 221). Notably 3.8's "levels" are
+  themselves just SYSTEM-PROMPT guidance, not hard token budgets. (2) Live on the
+  bundled engine: qwen3.5:0.8b think:"low" → 1122 thinking chars (≡ on, more than
+  true's 935); (3) ornith-1.5:9b think:"low" → 288 chars (≡ on), think:false → 0
+  both. Family is on/off, period. Optional follow-up if wanted: since 3.8's tiers
+  are prompt instructions, the backend directive could mimic them for bool-only
+  models (soft "levels as guidance") — user said no prompt-hacks unless asked.
+
+## 2026-10-19 (same session): prompt-based effort levels — IMPLEMENTED + LIVE-VERIFIED
+
+User approved the prompt-guidance lever after the "even Qwen3.8's tiers are just
+injected guidance" finding. Design mirrors ollama's own renderer:
+- `main.THINK_EFFORT_PROMPTS` (low/high strings, phrased after ollama's
+  qwen35.go lines) + pure `apply_think_effort(sys_prompt, think)` — normalize
+  (junk → no injection, never raises), append for low/high only (medium = model
+  default, ultra = uncapped — no line, matching ollama's choice).
+- Chat handler: applied LAST in the sys_prompt assembly (after the build
+  directive + auto-context), BOTH modes — in casual the guidance line may be
+  the whole system prompt (casual ships empty by default).
+- UI honesty pass: /think menu caveat now "low/high add effort guidance to the
+  system prompt · level-aware templates (gpt-oss, qwen3.8) budget them natively
+  · off is the hard off"; SettingsModal notes updated (all four layouts).
+- Harness: repro-think-levels.py +12 cases (append for low/high, no-op for
+  med/medium/off/on/ultra/None/auto/''/banana, empty-sysprompt case, bool-True
+  no-op) — ALL PASS. Full battery re-run after rebuild: mode-prompts 19,
+  tool-loop 10/10, resource-cart 30, chat-naming, split-thinking 19/19.
+- **LIVE A/B (ornith-1.5:9b, bool-only, think:true, same task + num_predict
+  cap):** no guidance → 1855 thinking chars; low-guidance line in system → 116
+  (−94%), answer still correct + complete. The ladder now does something real
+  on THIS box. Real budget tiering still only on gpt-oss/qwen3.8 templates.
+
+## 2026-10-19 (same session): RX 580 diagnosis + independent Vulkan/iGPU switches — IMPLEMENTED
+
+Friend's RX 580 (gfx803, 8 GB) won't offload: AMD's ROCm dropped GCN years ago and
+ollama's Windows AMD path is ROCm-only — the card is invisible there, model falls
+back to CPU. Vulkan is the only offload path for Polaris; verified the bundled
+engine SHIPS the runner (lib/ollama/vulkan/ggml-vulkan.dll) and llama.cpp Vulkan
+has no card-age gate.
+
+User's design call (correct instinct, refined by source): the Vulkan checkbox ALSO
+dragged the iGPU in — not via Vulkan itself but because engine_env()'s gpu branch
+set OLLAMA_IGPU_ENABLE=1 UNCONDITIONALLY, and Vulkan-path iGPUs are denied by
+DEFAULT (discover.integratedGPUAllowedByDefault: CUDA + whitelisted ROCm GFX only)
+— so that one line was the whole invitation. Now:
+- **Two independent HARD switches** (user request: "same logic, separate options"):
+  engine_vulkan + NEW engine_igpu settings; engine_env() in auto+gpu emits
+  OLLAMA_VULKAN=1/0 and OLLAMA_IGPU_ENABLE=1/0 per checkbox (cpu still hides every
+  backend). Explicit 0s even when off — stock 0.40.x defaults cut both ways (Vulkan
+  libs load by default; iGPUs denied by default), so hard switches are the only
+  predictable shape. No migration: upgraders on gpu mode with implicit iGPU offload
+  must tick iGPU once (owner's box: engine=gpu, engine_vulkan=1, engine_igpu unset
+  → TICK IT — Arrow Lake's iGPU is the only GPU there).
+- Backend: SettingsUpdate.engine_igpu + GET + PATCH + nothing-to-update gate.
+- Frontend: engineIgpu state/boot-read/saveSettings(param→payload→optimistic)/
+  modal prop; SettingsModal second checkbox UNDER Vulkan — "Use GPUs via Vulkan —
+  for AMD cards ROCm can't see (RX 500/Vega era and older)" / "Allow integrated
+  GPUs — tick if the iGPU is your ONLY gpu; untick so a discrete card (RX 580
+  etc.) wins over the iGPU"; env-preview refresh effect + autosave deps + build
+  payload carry igpuOn; /api/gpu env preview reflects engine_env automatically.
+- Verified: report/report/repro-engine-switches.py (temp APPDATA) — 12 checks:
+  every auto/gpu × vulkan/igpu combo, cpu all-off dominance, settings round-trip
+  (PATCH/GET true+false), empty-PATCH 422. ALL PASS. Full battery re-run after
+  rebuild (think-levels incl. effort prompts, mode-prompts, tool-loop,
+  resource-cart, chat-naming, split-thinking) — ALL PASS. Frontend build ok.
+- NOT verifiable here: no gfx803 card on this box — friend must click through:
+  update Adrenalin driver (Vulkan ICD ships with it) → Su1ra /settings → Vulkan ✓,
+  iGPU ✗ → [ restart server ] → log shows ggml_vulkan: 0 = Ellesmere [RX 580].
+  8 GB card: qwen3.5:4b q4 (~2.5 GB) sweet spot; 9B q4 fits, tight above ~8k ctx.
+
+## 2026-10-19 (same session): build-mode slowness root-caused + fixed — MEASURED
+
+User: "build mode can be pretty slow sometimes." Root cause chain, all verified on
+this box (ollama 0.40.1 live, qwen3.5:0.8b, ~2400-token prompt):
+1. ollama 0.40.1 renders prompts in Go (renderers) and POSTs to llama-server
+   /completion with **cache_prompt: true** (llm/llama_server.go:1657) — llama-server
+   DOES keep + restore KV per slot (log: "restored context checkpoint … n_past=3041").
+2. Prefix stability is therefore EVERYTHING: byte-identical request → TTFT 0.61s
+   (~44k tok/s effective = nothing re-processed); +2 tokens changed at the FRONT →
+   TTFT 14.78s at 213.9 tok/s — the ENTIRE prompt re-prefilled. 24x.
+3. The OLD auto-context design injected the live project listing INTO THE SYSTEM
+   PROMPT every build turn — and any ws_write/ws_edit changes file sizes → the
+   system prompt changed → divergence at the TOP of the payload → full history
+   re-prefill at ~214 tok/s on most tool turns. "Sometimes slow" = exactly the
+   turns after file work.
+4. **Fix:** the system prompt is now BYTE-STABLE per mode. The listing rides as a
+   TRAILING `user`-role "[context note — auto-attached…]" message after the newest
+   outgoing message (request-only, never DB, never the sys prompt; a stable
+   listing_note pointer lives in the directive). Turn N's prompt = turn N-1's
+   prompt + [assistant reply, new user msg, fresh note] → the KV reuse boundary is
+   the tail; per-turn prefill = O(one turn), not O(whole history). Chose role=user
+   over system for the tail because qwen3.8's renderer FOLDS non-leading system
+   messages into the top system turn (normalizeQwen38Messages) — which would
+   re-introduce the top-divergence; user-role renders verbatim in order in every
+   template. (In-message injection was rejected for the same reason: stored history
+   lacks the tail, so the divergence point would be turn 1.)
+5. keep_alive: stream_chat now sends keep_alive:"30m" (payload factored into pure
+   `ollama.chat_payload()` for testability) — the default 5m idle unload made every
+   turn after >5min of reading pay a full model reload. Mode-switch eviction still
+   explicit. NPU inquiry answered: llama.cpp has no NPU backend (shipped libs:
+   cuda_v12/v13 + vulkan + cpu) — no [npu] switch built, would be fake; NoLlama
+   (aweussom, Ollama-API-compatible OpenVINO server, NPU 10-23 tok/s, 4096 prompt
+   cap, no tools) found as the project the user half-remembered — usable TODAY via
+   /connect for casual; parked for a possible fplan sidecar engine.
+- Harness: report/report/repro-build-cache.py — 16 checks: system byte-stability
+  across turns with changing files, fresh trailing note per turn, the prefix-reuse
+  property (call N extends call N-1 minus ITS stale note; divergence lands on the
+  assistant reply), DB cleanliness, tools/ctx passthrough, chat_payload keep_alive/
+  think/num_ctx/no-system-role. Caught + fixed a real UnboundLocalError (ws_tail
+  unbound in casual — init moved above the tools branch; repro-mode-prompts
+  flagged it). All 7 suites + split-thinking 19/19 green after.
+- Live measurement numbers (this box, iGPU): stable-prefix TTFT 0.61s vs
+  front-diverged TTFT 14.78s (3032-3033 tokens @ 213.9 tok/s prefill).
+- Remaining build-mode levers NOT taken (parked): truncating OLD tool outputs in
+  build_history (a big ws_read replays in full every turn — next biggest win after
+  this one, but costs the model its earlier tool knowledge), KV cache quantization
+  (OLLAMA_KV_CACHE_TYPE), frontend per-delta render throttle (smoothness only).

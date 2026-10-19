@@ -126,6 +126,12 @@ def init_db():
         conv_columns = {r[1] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()}
         if "code_mode" not in conv_columns:
             conn.execute("ALTER TABLE conversations ADD COLUMN code_mode INTEGER NOT NULL DEFAULT 0")
+        if "titled_manually" not in conv_columns:
+            # 0 = the title was derived (first user message) or AI-generated —
+            # both may be replaced by the auto-titler. 1 = the user named this
+            # chat (/rename or a settings title edit); the auto-titler and the
+            # first-message derive never touch it.
+            conn.execute("ALTER TABLE conversations ADD COLUMN titled_manually INTEGER NOT NULL DEFAULT 0")
 
         # Seed / refresh the bundled system prompt:
         # - NULL means "never set" -> insert bundled.
@@ -225,7 +231,20 @@ def set_setting(key, value):
         )
 
 
-THINK_VALUES = ("on", "off", "low", "medium", "high", "max")
+THINK_VALUES = ("off", "low", "medium", "high", "on")
+
+# User-facing aliases -> canonical (canonical matches what Ollama accepts:
+# off/low/medium/high as the reasoning budget, on = uncapped). "ultra" is the
+# UI word for on; "max"/"med" are convenience spellings.
+THINK_ALIASES = {
+    "med": "medium",
+    "ultra": "on",
+    "max": "on",
+    "true": "on",
+    "1": "on",
+    "false": "off",
+    "0": "off",
+}
 
 
 def normalize_think(value):
@@ -236,9 +255,10 @@ def normalize_think(value):
     text = str(value).strip().lower()
     if text in ("", "auto", "default", "none"):
         return None
+    text = THINK_ALIASES.get(text, text)
     if text in THINK_VALUES:
         return text
-    raise ValueError(f"think must be auto/on/off (got {value!r})")
+    raise ValueError(f"think must be off/low/medium/high/on (or auto) (got {value!r})")
 
 
 def _conversation_dict(row):
@@ -252,6 +272,7 @@ def _conversation_dict(row):
         "context_length": row["context_length"],
         "think": row["think"] if "think" in keys else None,
         "code_mode": bool(row["code_mode"]) if "code_mode" in keys else False,
+        "titled_manually": bool(row["titled_manually"]) if "titled_manually" in keys else False,
         "created_at": row["created_at"],
     }
 
@@ -283,12 +304,14 @@ def update_conversation(conversation_id, **fields):
     allowed = {
         k: v
         for k, v in fields.items()
-        if k in ("title", "model", "system_prompt", "temperature", "context_length", "code_mode") and v is not None
+        if k in ("title", "model", "system_prompt", "temperature", "context_length", "code_mode", "titled_manually") and v is not None
     }
     if "think" in fields:
         allowed["think"] = normalize_think(fields["think"])
     if "code_mode" in allowed:
         allowed["code_mode"] = 1 if allowed["code_mode"] else 0
+    if "titled_manually" in allowed:
+        allowed["titled_manually"] = 1 if allowed["titled_manually"] else 0
     if not allowed:
         return get_conversation(conversation_id)
     sets = ", ".join(f"{k} = ?" for k in allowed)
@@ -572,7 +595,8 @@ def clear_conversation_messages(conversation_id):
             "DELETE FROM messages WHERE conversation_id = ?", (conversation_id,)
         ).rowcount
         conn.execute(
-            "UPDATE conversations SET title = ? WHERE id = ?", ("", conversation_id)
+            "UPDATE conversations SET title = ?, titled_manually = 0 WHERE id = ?",
+            ("", conversation_id),
         )
         return n
 

@@ -65,6 +65,9 @@ export const getConversation = (id) => getJSON(`/api/conversations/${id}`)
 export const createConversation = (data = {}) => sendJSON('/api/conversations', 'POST', data)
 
 export const updateConversation = (id, patch) => sendJSON(`/api/conversations/${id}`, 'PATCH', patch)
+// Fire-and-forget naming: the backend labels an untitled chat from its first
+// exchange (AI title, derived fallback); manual titles are never overwritten.
+export const autoTitleConversation = (id) => sendJSON(`/api/conversations/${id}/auto-title`, 'POST')
 
 export const deleteConversation = (id) => sendJSON(`/api/conversations/${id}`, 'DELETE')
 
